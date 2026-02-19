@@ -1,6 +1,10 @@
 package queueingmodel
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/queueingmodel/tuner"
+)
 
 // QueueingModelConfig implements interfaces.AnalyzerConfig
 type QueueingModelConfig struct {
@@ -10,6 +14,10 @@ type QueueingModelConfig struct {
 
 	// Tuning configuration
 	TuningEnabled bool
+
+	// TunerConfig provides user customization for the Kalman filter tuner.
+	// If nil, default configuration will be used.
+	TunerConfig *tuner.TunerConfigData
 }
 
 // SLOTarget defines TTFT/ITL targets for a model
