@@ -155,6 +155,12 @@ func NewEngine(client client.Client, scheme *runtime.Scheme, recorder record.Eve
 	// Register scale-to-zero queries in the metrics registry
 	registration.RegisterScaleToZeroQueries(metricsRegistry)
 
+	// Register queueing model queries (scheduler dispatch rate per endpoint).
+	// These are collected alongside saturation metrics into the shared
+	// ReplicaMetrics struct and used by the queueing model analyzer to
+	// estimate per-replica arrival rate and model queue behavior.
+	registration.RegisterQueueingModelQueries(metricsRegistry)
+
 	return &engine
 }
 

@@ -8,7 +8,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// ReplicaMetrics holds capacity-related metrics for a single replica
+// ReplicaMetrics holds per-replica metrics used by both the saturation analyzer
+// and the queueing model analyzer. Saturation analysis uses KV cache, queue, and
+// token-capacity fields, while the queueing model analyzer uses
+// ArrivalRate and MaxBatchSize to model queue dynamics and estimate optimal capacity.
 type ReplicaMetrics struct {
 	PodName         string
 	KvCacheUsage    float64 // KV cache utilization (0.0-1.0)
@@ -21,7 +24,7 @@ type ReplicaMetrics struct {
 	// Metadata contains freshness information (optional)
 	Metadata *ReplicaMetricsMetadata `json:"metadata,omitempty"`
 
-	// --- New fields for Saturation Analyzer V2 ---
+	// --- Fields for Saturation Analyzer V2 and Queueing Model Analyzer ---
 
 	// NumGpuBlocks is the total number of KV cache blocks allocated on GPU.
 	// Sourced from vllm:cache_config_info label "num_gpu_blocks".
@@ -45,11 +48,15 @@ type ReplicaMetrics struct {
 
 	// AvgOutputTokens is the average generation tokens per request on this replica.
 	// Derived from rate(generation_tokens_sum) / rate(generation_tokens_count).
+	// Used by saturation V2 for token-demand estimation (k2 derivation) and by
+	// the queueing model analyzer for RequestSize and service rate computation.
 	// Zero when metrics are unavailable.
 	AvgOutputTokens float64
 
 	// AvgInputTokens is the average prompt tokens per request on this replica.
 	// Derived from rate(prompt_tokens_sum) / rate(prompt_tokens_count).
+	// Used by saturation V2 for token-demand estimation (k2 derivation) and by
+	// the queueing model analyzer for RequestSize and service rate computation.
 	// Zero when metrics are unavailable.
 	AvgInputTokens float64
 
@@ -58,6 +65,19 @@ type ReplicaMetrics struct {
 	// Used to reduce estimated input token demand for scheduler-queued requests.
 	// Zero when prefix caching is disabled or metrics are unavailable.
 	PrefixCacheHitRate float64
+
+	// ArrivalRate is the request arrival rate to this replica in requests per second.
+	// Sourced from rate(inference_extension_scheduler_attempts_total{status="success"}[5m]) per pod.
+	// This represents requests being dispatched to this replica by the scheduler.
+	// Used by queueing model analyzer as Lambda (arrival rate) for queue dynamics estimation.
+	// Zero when scheduler metrics are unavailable.
+	ArrivalRate float64
+
+	// MaxBatchSize is the maximum number of concurrent inference requests this replica can process.
+	// Parsed from the --max-num-seqs flag in the pod's parent Deployment container args.
+	// Defaults to 256 (vLLM v0.8+ default) when the flag is not explicitly set.
+	// Used by queueing model analyzer.
+	MaxBatchSize int64
 }
 
 // ReplicaMetricsMetadata contains freshness information for replica metrics
