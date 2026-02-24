@@ -3,10 +3,12 @@ package queueingmodel
 import (
 	"context"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/queueingmodel/tuner"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/interfaces"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/pkg/analyzer"
 	"gonum.org/v1/gonum/mat"
 	ctrl "sigs.k8s.io/controller-runtime"
 )
@@ -31,7 +33,7 @@ func NewQueueingModelAnalyzer() *QueueingModelAnalyzer {
 
 // Name implements interfaces.Analyzer.
 func (a *QueueingModelAnalyzer) Name() string {
-	return "queueing_model"
+	return "queueing-model"
 }
 
 // Analyze implements interfaces.Analyzer.
@@ -64,6 +66,9 @@ func (a *QueueingModelAnalyzer) Analyze(
 	variantCapacities := a.computeAllVariantCapacities(
 		ctx, input.Namespace, input.ReplicaMetrics, input.VariantStates, sloTarget,
 	)
+	if len(variantCapacities) == 0 {
+		return nil, fmt.Errorf("could not compute variant capacities for model %q", input.ModelID)
+	}
 
 	// Aggregate and build result
 	totalSupply, totalDemand := aggregateCapacities(variantCapacities)
@@ -160,15 +165,114 @@ func (a *QueueingModelAnalyzer) updateVariantParameters(
 	}
 }
 
+// calculate capacities for all variants of a model in a given namespace
 func (a *QueueingModelAnalyzer) computeAllVariantCapacities(
 	ctx context.Context,
 	namespace string,
-	metrics []interfaces.ReplicaMetrics,
-	states []interfaces.VariantReplicaState,
-	slo *SLOTarget,
+	replicaMetrics []interfaces.ReplicaMetrics,
+	variantStates []interfaces.VariantReplicaState,
+	sloTarget *SLOTarget,
 ) []interfaces.VariantCapacity {
-	// TODO: Compute lambdaStar for each variant
-	return nil
+	logger := ctrl.LoggerFrom(ctx)
+
+	// queue configuration (assume common among variants)
+	maxBatchSize := DefaultMaxBatchSize
+	maxQueueSize := DefaultMaxQueueSize
+
+	variantCapacities := make([]interfaces.VariantCapacity, 0)
+	for _, variantState := range variantStates {
+		variantName := variantState.VariantName
+
+		// accumulate data over all pod replicas of the variant
+		totalInputTokens := float32(0.0)
+		totalOutputTokens := float32(0.0)
+		totalRequestRate := float32(0.0)
+		numPods := 0
+		for _, rm := range replicaMetrics {
+			if rm.VariantName != variantName || rm.Namespace != namespace {
+				continue
+			}
+
+			// TODO: include request rate in ReplicaMetrics
+			// TODO: if request rate is zero, skip pod
+			// totalRequestRate += float64(rm.RequestRate)
+
+			totalInputTokens += float32(rm.AvgInputTokens)
+			totalOutputTokens += float32(rm.AvgOutputTokens)
+			numPods++
+		}
+		if numPods == 0 {
+			logger.Info("No replicas to calculate capacity for variant", "variant", variantName)
+			continue
+		}
+
+		// prefill and decode parameters
+		params := a.paramStore.Get(namespace, variantName)
+		if params == nil {
+			logger.Info("No parameters found for variant", "variant", variantName)
+			continue
+		}
+
+		// create queue analyzer
+		config := &analyzer.Configuration{
+			MaxBatchSize: maxBatchSize,
+			MaxQueueSize: maxQueueSize,
+			ServiceParms: &analyzer.ServiceParms{
+				Alpha: params.Alpha,
+				Beta:  params.Beta,
+				Gamma: params.Gamma,
+			},
+		}
+
+		requestSize := &analyzer.RequestSize{
+			AvgInputTokens:  totalInputTokens / float32(numPods),
+			AvgOutputTokens: totalOutputTokens / float32(numPods),
+		}
+
+		targetPerf := &analyzer.TargetPerf{
+			TargetTTFT: sloTarget.TargetTTFT,
+			TargetITL:  sloTarget.TargetITL,
+		}
+
+		queueAnalyzer, err := analyzer.NewQueueAnalyzer(config, requestSize)
+		if err != nil {
+			logger.Info("Failed to create queue analyzer for variant", "variant", variantName, "error", err)
+			continue
+		}
+
+		var maxRequestRate float32
+		if _, metrics, _, err := queueAnalyzer.Size(targetPerf); err != nil {
+			logger.Info("Failed to calculate max request rate for variant", "variant", variantName, "error", err)
+			continue
+		} else {
+			maxRequestRate = metrics.MaxRate
+		}
+
+		if maxRequestRate == 0 {
+			logger.Info("Failed to calculate max request rate for variant", "variant", variantName)
+			continue
+		}
+
+		desiredNumReplicas := math.Ceil(float64(totalRequestRate) / float64(maxRequestRate))
+		requestRatePerReplica := totalRequestRate / float32(desiredNumReplicas)
+
+		replicaCount := variantState.CurrentReplicas
+		variantCapacity := interfaces.VariantCapacity{
+			VariantName:        variantName,
+			AcceleratorName:    replicaMetrics[0].AcceleratorName,
+			Cost:               replicaMetrics[0].Cost * float64(replicaCount),
+			TotalCapacity:      desiredNumReplicas * float64(maxRequestRate),
+			PerReplicaCapacity: float64(maxRequestRate),
+			TotalDemand:        float64(totalRequestRate),
+			Utilization:        float64(requestRatePerReplica / maxRequestRate),
+
+			ReplicaCount:    variantState.CurrentReplicas,
+			PendingReplicas: variantState.PendingReplicas,
+		}
+		variantCapacities = append(variantCapacities, variantCapacity)
+	}
+
+	return variantCapacities
 }
 
 func (a *QueueingModelAnalyzer) emptyResult(input interfaces.AnalyzerInput) *interfaces.AnalyzerResult {
@@ -385,12 +489,12 @@ func (a *QueueingModelAnalyzer) storeParametersFromResults(
 
 // flattenCovariance converts a 2D covariance matrix to a flat slice.
 func flattenCovariance(cov [][]float64) []float64 {
-	if cov == nil || len(cov) == 0 {
+	if len(cov) == 0 {
 		return nil
 	}
 	n := len(cov)
 	flat := make([]float64, 0, n*n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		flat = append(flat, cov[i]...)
 	}
 	return flat
@@ -403,7 +507,7 @@ func matrixToSlice2D(m *mat.Dense) [][]float64 {
 	}
 	rows, cols := m.Dims()
 	result := make([][]float64, rows)
-	for i := 0; i < rows; i++ {
+	for i := range rows {
 		result[i] = make([]float64, cols)
 		for j := 0; j < cols; j++ {
 			result[i][j] = m.At(i, j)
