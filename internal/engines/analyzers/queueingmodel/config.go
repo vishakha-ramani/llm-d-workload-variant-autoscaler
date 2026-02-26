@@ -12,12 +12,23 @@ type QueueingModelConfig struct {
 	// Key format: "namespace/modelID"
 	SLOTargets map[string]*SLOTarget
 
+	// SLOMultiplier is the queueing delay multiplier (k) used when inferring SLO
+	// targets from the queueing model. It controls how much the iteration time is
+	// allowed to inflate relative to the idle baseline alpha:
+	//   TargetTTFT = k×alpha + (beta+gamma)×input_len
+	//   TargetITL  = k×alpha + beta + gamma×(input_len + (output_len+1)/2)
+	// The utilization correspondence is rho = 1 - 1/k.
+	// Zero value means use DefaultSLOMultiplier (3.0, rho=0.67).
+	SLOMultiplier float64
+
 	// Tuning configuration
 	TuningEnabled bool
 
-	// TunerConfig provides user customization for the Kalman filter tuner.
-	// If nil, default configuration will be used.
-	TunerConfig *tuner.TunerConfigData
+	// FilterConfig provides user customization for the Kalman filter behavior.
+	// These parameters (GammaFactor, ErrorLevel, TPercentile) control the filter's
+	// noise model and are hardware-independent, so they are shared across all variants.
+	// If nil, default filter configuration will be used.
+	FilterConfig *tuner.FilterData
 }
 
 // SLOTarget defines TTFT/ITL targets for a model

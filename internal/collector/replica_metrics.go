@@ -98,7 +98,7 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 	// Refresh all Prometheus-sourced queries:
 	// - Saturation: KV cache, queue length, cache config, prefix cache hit rate
 	// - Shared (saturation + queueing model): avg input tokens, avg output tokens
-	// - Queueing model: scheduler dispatch rate (arrival rate per replica)
+	// - Queueing model: scheduler dispatch rate, avg TTFT, avg ITL
 	queries := []string{
 		registration.QueryKvCacheUsage,
 		registration.QueryQueueLength,
@@ -107,6 +107,8 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 		registration.QueryAvgInputTokens,
 		registration.QueryPrefixCacheHitRate,
 		registration.QuerySchedulerDispatchRate,
+		registration.QueryAvgTTFT,
+		registration.QueryAvgITL,
 	}
 
 	results, err := c.source.Refresh(ctx, source.RefreshSpec{
@@ -135,6 +137,8 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 		// Queueing model fields
 		arrivalRate    float64
 		hasArrivalRate bool
+		avgTTFT        float64
+		avgITL         float64
 	}
 
 	// Extract per-pod metrics from results
@@ -328,7 +332,57 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 		}
 	}
 
+	// Process average TTFT results (seconds)
+	if result := results[registration.QueryAvgTTFT]; result != nil {
+		if !result.HasError() {
+			for _, value := range result.Values {
+				podName := value.Labels["pod"]
+				if podName == "" {
+					podName = value.Labels["pod_name"]
+				}
+				if podName == "" {
+					continue
+				}
 
+				if podData[podName] == nil {
+					podData[podName] = &podMetricData{}
+				}
+				if !math.IsNaN(value.Value) && !math.IsInf(value.Value, 0) && value.Value > 0 {
+					podData[podName].avgTTFT = value.Value
+
+					logger.V(logging.DEBUG).Info("Avg TTFT metric",
+						"pod", podName,
+						"avgTTFTSeconds", value.Value)
+				}
+			}
+		}
+	}
+
+	// Process average ITL results (seconds)
+	if result := results[registration.QueryAvgITL]; result != nil {
+		if !result.HasError() {
+			for _, value := range result.Values {
+				podName := value.Labels["pod"]
+				if podName == "" {
+					podName = value.Labels["pod_name"]
+				}
+				if podName == "" {
+					continue
+				}
+
+				if podData[podName] == nil {
+					podData[podName] = &podMetricData{}
+				}
+				if !math.IsNaN(value.Value) && !math.IsInf(value.Value, 0) && value.Value > 0 {
+					podData[podName].avgITL = value.Value
+
+					logger.V(logging.DEBUG).Info("Avg ITL metric",
+						"pod", podName,
+						"avgITLSeconds", value.Value)
+				}
+			}
+		}
+	}
 
 	// Pre-compute MaxBatchSize per deployment from container args.
 	// MaxBatchSize (--max-num-seqs) is not a Prometheus metric; it is parsed
@@ -444,6 +498,8 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 			PrefixCacheHitRate:    data.prefixCacheHitRate,
 			ArrivalRate:           data.arrivalRate,
 			MaxBatchSize:          maxBatchSize,
+			AvgTTFT:              data.avgTTFT,
+			AvgITL:               data.avgITL,
 			Metadata: &interfaces.ReplicaMetricsMetadata{
 				CollectedAt:     collectedAt,
 				Age:             0, // Fresh
