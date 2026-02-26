@@ -1,0 +1,140 @@
+package saturation
+
+import (
+	"context"
+	"fmt"
+
+	ctrl "sigs.k8s.io/controller-runtime"
+
+	llmdVariantAutoscalingV1alpha1 "github.com/llm-d/llm-d-workload-variant-autoscaler/api/v1alpha1"
+	queueingmodel "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/queueingmodel"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/pipeline"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/interfaces"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/logging"
+)
+
+// optimizeQueueingModel runs the queueing model-based analysis path.
+// Follows the same three-stage pattern as optimizeV2:
+//  1. Collect ModelScalingRequests (metrics + analysis per model)
+//  2. Call optimizer to produce VariantDecisions
+//  3. Apply enforcer constraints per model
+func (e *Engine) optimizeQueueingModel(
+	ctx context.Context,
+	modelGroups map[string][]llmdVariantAutoscalingV1alpha1.VariantAutoscaling,
+	currentAllocations map[string]*interfaces.Allocation,
+) []interfaces.VariantDecision {
+	logger := ctrl.LoggerFrom(ctx)
+
+	// Stage 1: Collect ModelScalingRequests for all models
+	var requests []pipeline.ModelScalingRequest
+
+	for groupKey, modelVAs := range modelGroups {
+		modelID := modelVAs[0].Spec.ModelID
+		namespace := modelVAs[0].Namespace
+		logger.Info("Processing model (queueing-model)",
+			"modelID", modelID,
+			"namespace", namespace,
+			"variantCount", len(modelVAs),
+			"groupKey", groupKey)
+
+		data, err := e.prepareModelData(ctx, modelID, modelVAs, e.client)
+		if err != nil {
+			logger.Error(err, "Model data preparation failed", "modelID", modelID)
+			e.emitSafetyNetMetrics(ctx, modelVAs, currentAllocations)
+			continue
+		}
+		if data == nil {
+			logger.V(logging.DEBUG).Info("Skipping model: no metrics available", "modelID", modelID)
+			continue
+		}
+
+		qConfig := buildQueueingModelConfig()
+
+		result, err := e.runQueueingModelAnalysis(ctx, modelID, namespace,
+			data.replicaMetrics, qConfig, data.variantStates)
+		if err != nil {
+			logger.Error(err, "Queueing model analysis failed", "modelID", modelID)
+			e.emitSafetyNetMetrics(ctx, modelVAs, currentAllocations)
+			continue
+		}
+
+		requests = append(requests, pipeline.ModelScalingRequest{
+			ModelID:       modelID,
+			Namespace:     namespace,
+			Result:        result,
+			VariantStates: data.variantStates,
+		})
+	}
+
+	if len(requests) == 0 {
+		return nil
+	}
+
+	// Stage 2: Call optimizer
+	allDecisions := e.optimizer.Optimize(ctx, requests, nil)
+
+	logger.Info("Queueing model optimizer produced decisions",
+		"optimizer", e.optimizer.Name(),
+		"decisionCount", len(allDecisions),
+		"modelCount", len(requests))
+
+	// Stage 3: Apply enforcer per-model (directly on decisions)
+	for _, req := range requests {
+		scaleToZeroConfig := e.Config.ScaleToZeroConfigForNamespace(req.Namespace)
+
+		scaledToZero := e.ScaleToZeroEnforcer.EnforcePolicyOnDecisions(
+			ctx, req.ModelID, req.Namespace,
+			allDecisions, scaleToZeroConfig, e.optimizer.Name(),
+		)
+		if scaledToZero {
+			logger.Info("Scale-to-zero enforcement applied (queueing-model)",
+				"modelID", req.ModelID)
+		}
+	}
+
+	return allDecisions
+}
+
+// runQueueingModelAnalysis runs the queueing model analyzer for a single model
+// and returns the raw AnalyzerResult.
+func (e *Engine) runQueueingModelAnalysis(
+	ctx context.Context,
+	modelID, namespace string,
+	replicaMetrics []interfaces.ReplicaMetrics,
+	config *queueingmodel.QueueingModelConfig,
+	variantStates []interfaces.VariantReplicaState,
+) (*interfaces.AnalyzerResult, error) {
+	logger := ctrl.LoggerFrom(ctx)
+
+	input := interfaces.AnalyzerInput{
+		ModelID:        modelID,
+		Namespace:      namespace,
+		ReplicaMetrics: replicaMetrics,
+		VariantStates:  variantStates,
+		Config:         config,
+	}
+
+	result, err := e.queueingModelAnalyzer.Analyze(ctx, input)
+	if err != nil {
+		return nil, fmt.Errorf("queueing model analysis failed: %w", err)
+	}
+
+	logger.Info("Queueing model analysis completed",
+		"modelID", modelID,
+		"totalSupply", result.TotalSupply,
+		"totalDemand", result.TotalDemand,
+		"utilization", result.Utilization,
+		"requiredCapacity", result.RequiredCapacity,
+		"spareCapacity", result.SpareCapacity)
+
+	return result, nil
+}
+
+// buildQueueingModelConfig creates a QueueingModelConfig with defaults.
+// SLO targets are inferred from metrics by the analyzer when not explicitly set.
+func buildQueueingModelConfig() *queueingmodel.QueueingModelConfig {
+	return &queueingmodel.QueueingModelConfig{
+		TuningEnabled: true,
+		SLOMultiplier: queueingmodel.DefaultSLOMultiplier,
+	}
+}

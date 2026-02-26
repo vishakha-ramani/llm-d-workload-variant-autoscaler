@@ -38,6 +38,7 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/collector/source"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/discovery"
+	queueingmodel "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/queueingmodel"
 	saturation_v2 "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/saturation_v2"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/common"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/executor"
@@ -71,6 +72,10 @@ type Engine struct {
 
 	// saturationV2Analyzer is the V2 token-based saturation analyzer (initialized once).
 	saturationV2Analyzer *saturation_v2.SaturationAnalyzer
+
+	// queueingModelAnalyzer is the queueing model-based analyzer (initialized once).
+	// Selected via analyzerName: "queueing-model" in SaturationScalingConfig.
+	queueingModelAnalyzer *queueingmodel.QueueingModelAnalyzer
 
 	// capacityStore is shared with the V2 analyzer for caching capacity knowledge.
 	capacityStore *saturation_v2.CapacityKnowledgeStore
@@ -118,6 +123,7 @@ func NewEngine(client client.Client, scheme *runtime.Scheme, recorder record.Eve
 		GPULimiter:              gpuLimiter,
 		metricsRegistry:         metricsRegistry,
 		saturationV2Analyzer:    saturation_v2.NewSaturationAnalyzer(capacityStore),
+		queueingModelAnalyzer:  queueingmodel.NewQueueingModelAnalyzer(),
 		capacityStore:           capacityStore,
 		optimizer:               scalingOptimizer,
 	}
@@ -217,39 +223,45 @@ func (e *Engine) optimize(ctx context.Context) error {
 	// Keyed by VariantAutoscaling Namespace/Name
 	currentAllocations := make(map[string]*interfaces.Allocation)
 
-	// Determine whether to use V2 token-based optimizer path from global config.
-	// Config value "saturation" selects the V2 token-based analyzer;
-	// empty/other values use the V1 percentage-based analyzer.
+	// Determine which analyzer to use from global config.
+	// Config values:
+	//   "saturation"      → V2 token-based saturation analyzer
+	//   "queueing-model"  → Queueing model-based analyzer (SLO-driven)
+	//   "" (default)      → V1 percentage-based saturation analyzer (legacy)
 	globalSatCfgMap := e.Config.SaturationConfig()
-	useV2 := false
+	analyzerName := ""
 	enableLimiter := false
 	if cfg, ok := globalSatCfgMap["default"]; ok {
 		cfg.ApplyDefaults()
-		useV2 = cfg.AnalyzerName == "saturation"
+		analyzerName = cfg.AnalyzerName
 		enableLimiter = cfg.EnableLimiter
 	}
 
 	// Select optimizer based on enableLimiter flag (both are stateless, safe to swap)
-	if useV2 {
+	// Applies to V2 and queueing-model paths which both use the optimizer pipeline.
+	if analyzerName == "saturation" || analyzerName == "queueing-model" {
 		if enableLimiter {
 			e.optimizer = pipeline.NewGreedyBySaturationOptimizer()
 		} else {
 			e.optimizer = pipeline.NewCostAwareOptimizer()
 		}
-		logger.V(logging.DEBUG).Info("V2 optimizer selected", "optimizer", e.optimizer.Name(), "enableLimiter", enableLimiter)
+		logger.V(logging.DEBUG).Info("Optimizer selected", "analyzer", analyzerName, "optimizer", e.optimizer.Name(), "enableLimiter", enableLimiter)
 	}
 
 	var allDecisions []interfaces.VariantDecision
 
-	// V1 and V2 have separate optimize paths because they use fundamentally
+	// Each analyzer has a separate optimize path because they use fundamentally
 	// different analysis types and target-building flows:
 	//   - V1: saturation.Analyzer → ModelSaturationAnalysis → CalculateSaturationTargets → Enforcer → Limiter
 	//   - V2: saturation_v2.Analyzer → AnalyzerResult → Optimizer.Optimize → Enforcer bridge
-	// V1 will be deprecated once V2 is fully validated, at which point the
-	// V1 path and the saturation.Analyzer can be removed.
-	if useV2 {
+	//   - Queueing model: QueueingModelAnalyzer → AnalyzerResult → Optimizer.Optimize → Enforcer bridge
+	// V1 will be deprecated once V2 is fully validated.
+	switch analyzerName {
+	case "queueing-model":
+		allDecisions = e.optimizeQueueingModel(ctx, modelGroups, currentAllocations)
+	case "saturation":
 		allDecisions = e.optimizeV2(ctx, modelGroups, currentAllocations)
-	} else {
+	default:
 		allDecisions = e.optimizeV1(ctx, modelGroups, currentAllocations)
 	}
 
