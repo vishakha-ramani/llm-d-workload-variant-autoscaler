@@ -25,6 +25,15 @@ func (e *Engine) optimizeQueueingModel(
 ) []interfaces.VariantDecision {
 	logger := ctrl.LoggerFrom(ctx)
 
+	// update analyzer given current models
+	currentModelKeys := make(map[string]bool, len(modelGroups))
+	for _, modelVAs := range modelGroups {
+		namespace := modelVAs[0].Namespace
+		modelID := modelVAs[0].Spec.ModelID
+		currentModelKeys[queueingmodel.MakeModelKey(namespace, modelID)] = true
+	}
+	e.queueingModelAnalyzer.Update(currentModelKeys)
+
 	// Stage 1: Collect ModelScalingRequests for all models
 	var requests []pipeline.ModelScalingRequest
 

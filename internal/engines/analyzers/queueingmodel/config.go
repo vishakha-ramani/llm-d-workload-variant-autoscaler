@@ -1,8 +1,6 @@
 package queueingmodel
 
 import (
-	"fmt"
-
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/queueingmodel/tuner"
 )
 
@@ -12,7 +10,7 @@ type QueueingModelConfig struct {
 	// Key format: "namespace/modelID"
 	SLOTargets map[string]*SLOTarget
 
-	// SLOMultiplier is the queueing delay multiplier (k) used when inferring SLO
+	// SLOMultiplier is the queueing delay multiplier (k>1) used when inferring SLO
 	// targets from the queueing model. It controls how much the iteration time is
 	// allowed to inflate relative to the idle baseline alpha:
 	//   TargetTTFT = k×alpha + (beta+gamma)×input_len
@@ -39,7 +37,7 @@ type SLOTarget struct {
 
 // GetAnalyzerName implements interfaces.AnalyzerConfig
 func (c *QueueingModelConfig) GetAnalyzerName() string {
-	return "queueing_model"
+	return QueueingModelAnalyzerName
 }
 
 // GetSLOForModel retrieves SLO targets for a model in a namespace
@@ -47,11 +45,6 @@ func (c *QueueingModelConfig) GetSLOForModel(namespace, modelID string) *SLOTarg
 	if c.SLOTargets == nil {
 		return nil
 	}
-	key := makeSLOKey(namespace, modelID)
+	key := MakeModelKey(namespace, modelID)
 	return c.SLOTargets[key]
-}
-
-// makeSLOKey creates a unique key for SLO targets
-func makeSLOKey(namespace, modelID string) string {
-	return fmt.Sprintf("%s/%s", namespace, modelID)
 }

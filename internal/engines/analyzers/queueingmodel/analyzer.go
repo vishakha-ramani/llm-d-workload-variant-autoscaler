@@ -9,7 +9,6 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/queueingmodel/tuner"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/interfaces"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/pkg/analyzer"
-	"gonum.org/v1/gonum/mat"
 	ctrl "sigs.k8s.io/controller-runtime"
 )
 
@@ -19,21 +18,21 @@ import (
 //  2. Using queueing model to predict max request rate that meets TTFT/ITL SLOs
 //  3. Computing capacity signals for scaling decisions
 
-type QueueingModelAnalyzer struct { // all data that is stored -- map of variants?
-	// paramStore caches learned parameters per variant
-	paramStore *ParameterStore
+type QueueingModelAnalyzer struct {
+	// modelsParameterStore caches learned parameters of variants for all models
+	modelsParameterStore map[string]*ParameterStore // key: modelKey (namespace/modelID)
 }
 
 // NewQueueingModelAnalyzer creates a new queueing model analyzer instance.
 func NewQueueingModelAnalyzer() *QueueingModelAnalyzer {
 	return &QueueingModelAnalyzer{
-		paramStore: NewParameterStore(),
+		modelsParameterStore: make(map[string]*ParameterStore),
 	}
 }
 
 // Name implements interfaces.Analyzer.
 func (a *QueueingModelAnalyzer) Name() string {
-	return "queueing-model"
+	return QueueingModelAnalyzerName
 }
 
 // Analyze implements interfaces.Analyzer.
@@ -51,6 +50,8 @@ func (a *QueueingModelAnalyzer) Analyze(
 	input interfaces.AnalyzerInput,
 ) (*interfaces.AnalyzerResult, error) {
 	logger := ctrl.LoggerFrom(ctx)
+	modelID := input.ModelID
+	namespace := input.Namespace
 
 	// Extract config
 	qConfig, ok := input.Config.(*QueueingModelConfig)
@@ -60,22 +61,22 @@ func (a *QueueingModelAnalyzer) Analyze(
 
 	// Update parameters (tuner) for all variants associated with the model
 	if qConfig.TuningEnabled {
-		a.updateVariantParameters(ctx, input.Namespace, input.ReplicaMetrics, qConfig)
+		a.updateVariantParameters(ctx, namespace, modelID, input.ReplicaMetrics, qConfig)
 	}
 
 	// Get SLO targets
-	sloTarget := a.getSLOTarget(ctx, input.Namespace, input.ModelID, qConfig, input.ReplicaMetrics)
+	sloTarget := a.getSLOTarget(ctx, namespace, modelID, qConfig, input.ReplicaMetrics)
 	if sloTarget == nil {
-		logger.Info("No SLO targets", "modelID", input.ModelID)
+		logger.Info("No SLO targets", "modelID", modelID)
 		return a.emptyResult(input), nil
 	}
 
 	// Compute capacities
 	variantCapacities := a.computeAllVariantCapacities(
-		ctx, input.Namespace, input.ReplicaMetrics, input.VariantStates, sloTarget,
+		ctx, namespace, modelID, input.ReplicaMetrics, input.VariantStates, sloTarget,
 	)
 	if len(variantCapacities) == 0 {
-		return nil, fmt.Errorf("could not compute variant capacities for model %q", input.ModelID)
+		return nil, fmt.Errorf("could not compute variant capacities for model %q", modelID)
 	}
 
 	// Aggregate and build result
@@ -87,15 +88,15 @@ func (a *QueueingModelAnalyzer) Analyze(
 
 	return &interfaces.AnalyzerResult{
 		AnalyzerName:      a.Name(),
-		ModelID:           input.ModelID,
-		Namespace:         input.Namespace,
+		ModelID:           modelID,
+		Namespace:         namespace,
 		AnalyzedAt:        time.Now(),
 		VariantCapacities: variantCapacities,
 		TotalSupply:       totalSupply,
 		TotalDemand:       totalDemand,
 		Utilization:       utilization,
-		RequiredCapacity:  max(0, totalDemand-totalSupply),
-		SpareCapacity:     max(0, totalSupply-totalDemand),
+		RequiredCapacity:  math.Max(0, totalDemand-totalSupply),
+		SpareCapacity:     math.Max(0, totalSupply-totalDemand),
 	}, nil
 }
 
@@ -111,12 +112,13 @@ func (a *QueueingModelAnalyzer) getSLOTarget(
 		return slo
 	}
 	// Infer SLO from the queueing model and observed metrics
-	return a.guessSLOFromMetrics(ctx, namespace, config, metrics)
+	return a.guessSLOFromMetrics(ctx, namespace, modelID, config, metrics)
 }
 
 func (a *QueueingModelAnalyzer) updateVariantParameters(
 	ctx context.Context,
 	namespace string,
+	modelID string,
 	metrics []interfaces.ReplicaMetrics,
 	config *QueueingModelConfig,
 ) {
@@ -128,7 +130,7 @@ func (a *QueueingModelAnalyzer) updateVariantParameters(
 	// Run tuner for each variant
 	for variantName, replicaMetrics := range variantMetrics {
 		// Build environment from aggregated replica metrics
-		env, err := a.buildEnvironmentFromMetrics(ctx, variantName, replicaMetrics)
+		env, err := a.buildEnvironmentFromMetrics(variantName, replicaMetrics)
 		if err != nil {
 			logger.V(1).Info("Failed to build environment for variant",
 				"variant", variantName,
@@ -138,7 +140,7 @@ func (a *QueueingModelAnalyzer) updateVariantParameters(
 		}
 
 		// Create a tuner for this variant
-		tuner, err := a.createTuner(ctx, namespace, variantName, env, config.FilterConfig)
+		tuner, err := a.createTuner(ctx, namespace, variantName, modelID, env, config.FilterConfig)
 		if err != nil {
 			logger.V(1).Info("Failed to get/create tuner for variant",
 				"variant", variantName,
@@ -158,7 +160,7 @@ func (a *QueueingModelAnalyzer) updateVariantParameters(
 		}
 
 		// Store tuned parameters
-		a.storeParametersFromResults(namespace, variantName, results)
+		a.storeParametersFromResults(namespace, variantName, modelID, results)
 
 		// Log tuning results
 		if results.ValidationFailed {
@@ -182,15 +184,41 @@ func (a *QueueingModelAnalyzer) updateVariantParameters(
 func (a *QueueingModelAnalyzer) computeAllVariantCapacities(
 	ctx context.Context,
 	namespace string,
+	modelID string,
 	replicaMetrics []interfaces.ReplicaMetrics,
 	variantStates []interfaces.VariantReplicaState,
 	sloTarget *SLOTarget,
 ) []interfaces.VariantCapacity {
 	logger := ctrl.LoggerFrom(ctx)
 
-	variantCapacities := make([]interfaces.VariantCapacity, 0)
+	// Build cost and accelerator lookup from input metrics
+	variantCost := make(map[string]float64)
+	variantAccel := make(map[string]string)
+	for _, rm := range replicaMetrics {
+		if _, ok := variantCost[rm.VariantName]; !ok {
+			variantCost[rm.VariantName] = rm.Cost
+			variantAccel[rm.VariantName] = rm.AcceleratorName
+		}
+	}
+
+	variantCapacities := make([]interfaces.VariantCapacity, 0, len(variantStates))
 	for _, variantState := range variantStates {
 		variantName := variantState.VariantName
+		readyCount := max(variantState.CurrentReplicas-variantState.PendingReplicas, 0)
+
+		// variant capacity in case of error
+		errorVariantCapacity := interfaces.VariantCapacity{
+			VariantName:     variantName,
+			AcceleratorName: variantAccel[variantName],
+			Cost:            variantCost[variantName],
+			ReplicaCount:    readyCount,
+			PendingReplicas: variantState.PendingReplicas,
+
+			PerReplicaCapacity: 1.0,
+			TotalCapacity:      1.0,
+			TotalDemand:        0.0,
+			Utilization:        0.0,
+		}
 
 		// Accumulate data over all pod replicas of the variant
 		totalInputTokens := float32(0.0)
@@ -221,6 +249,8 @@ func (a *QueueingModelAnalyzer) computeAllVariantCapacities(
 		}
 		if numPods == 0 {
 			logger.Info("No replicas with traffic to calculate capacity for variant", "variant", variantName)
+			vr := errorVariantCapacity
+			variantCapacities = append(variantCapacities, vr)
 			continue
 		}
 
@@ -230,9 +260,11 @@ func (a *QueueingModelAnalyzer) computeAllVariantCapacities(
 		}
 
 		// Prefill and decode parameters
-		params := a.paramStore.Get(namespace, variantName)
+		params := a.getParams(modelID, namespace, variantName)
 		if params == nil {
 			logger.Info("No parameters found for variant", "variant", variantName)
+			vr := errorVariantCapacity
+			variantCapacities = append(variantCapacities, vr)
 			continue
 		}
 
@@ -260,12 +292,16 @@ func (a *QueueingModelAnalyzer) computeAllVariantCapacities(
 		queueAnalyzer, err := analyzer.NewQueueAnalyzer(config, requestSize)
 		if err != nil {
 			logger.Info("Failed to create queue analyzer for variant", "variant", variantName, "error", err)
+			vr := errorVariantCapacity
+			variantCapacities = append(variantCapacities, vr)
 			continue
 		}
 
 		var maxRequestRate float32
 		if _, metrics, _, err := queueAnalyzer.Size(targetPerf); err != nil {
 			logger.Info("Failed to calculate max request rate for variant", "variant", variantName, "error", err)
+			vr := errorVariantCapacity
+			variantCapacities = append(variantCapacities, vr)
 			continue
 		} else {
 			maxRequestRate = metrics.Throughput
@@ -273,6 +309,8 @@ func (a *QueueingModelAnalyzer) computeAllVariantCapacities(
 
 		if maxRequestRate == 0 {
 			logger.Info("Failed to calculate max request rate for variant", "variant", variantName)
+			vr := errorVariantCapacity
+			variantCapacities = append(variantCapacities, vr)
 			continue
 		}
 
@@ -282,18 +320,17 @@ func (a *QueueingModelAnalyzer) computeAllVariantCapacities(
 		}
 		arrivalRatePerReplica := totalArrivalRate / float32(desiredNumReplicas)
 
-		replicaCount := variantState.CurrentReplicas
 		variantCapacity := interfaces.VariantCapacity{
-			VariantName:        variantName,
-			AcceleratorName:    replicaMetrics[0].AcceleratorName,
-			Cost:               replicaMetrics[0].Cost * float64(replicaCount),
-			TotalCapacity:      desiredNumReplicas * float64(maxRequestRate),
+			VariantName:     variantName,
+			AcceleratorName: variantAccel[variantName],
+			Cost:            variantCost[variantName], // TODO: multiply by numReplicas?
+			ReplicaCount:    readyCount,
+			PendingReplicas: variantState.PendingReplicas,
+
 			PerReplicaCapacity: float64(maxRequestRate),
+			TotalCapacity:      desiredNumReplicas * float64(maxRequestRate),
 			TotalDemand:        float64(totalArrivalRate),
 			Utilization:        float64(arrivalRatePerReplica / maxRequestRate),
-
-			ReplicaCount:    variantState.CurrentReplicas,
-			PendingReplicas: variantState.PendingReplicas,
 		}
 		variantCapacities = append(variantCapacities, variantCapacity)
 	}
@@ -318,13 +355,6 @@ func aggregateCapacities(capacities []interfaces.VariantCapacity) (supply, deman
 	return
 }
 
-func max(a, b float64) float64 {
-	if a > b {
-		return a
-	}
-	return b
-}
-
 // guessSLOFromMetrics infers SLO targets from the queueing model when no
 // explicit SLO configuration is provided.
 //
@@ -345,6 +375,7 @@ func max(a, b float64) float64 {
 func (a *QueueingModelAnalyzer) guessSLOFromMetrics(
 	ctx context.Context,
 	namespace string,
+	modelID string,
 	config *QueueingModelConfig,
 	metrics []interfaces.ReplicaMetrics,
 ) *SLOTarget {
@@ -364,7 +395,7 @@ func (a *QueueingModelAnalyzer) guessSLOFromMetrics(
 	// Try theory-based SLO: find a variant with learned parameters
 	variantMetrics := groupMetricsByVariant(metrics)
 	for variantName := range variantMetrics {
-		params := a.paramStore.Get(namespace, variantName)
+		params := a.getParams(modelID, namespace, variantName)
 		if params == nil {
 			continue
 		}
@@ -477,10 +508,10 @@ func aggregateWorkloadMetrics(metrics []interfaces.ReplicaMetrics) *workloadMetr
 }
 
 // groupMetricsByVariant groups replica metrics by variant name.
-func groupMetricsByVariant(metrics []interfaces.ReplicaMetrics) map[string][]interfaces.ReplicaMetrics {
-	grouped := make(map[string][]interfaces.ReplicaMetrics)
+func groupMetricsByVariant(metrics []interfaces.ReplicaMetrics) map[string][]*interfaces.ReplicaMetrics {
+	grouped := make(map[string][]*interfaces.ReplicaMetrics)
 	for _, m := range metrics {
-		grouped[m.VariantName] = append(grouped[m.VariantName], m)
+		grouped[m.VariantName] = append(grouped[m.VariantName], &m)
 	}
 	return grouped
 }
@@ -490,9 +521,8 @@ func groupMetricsByVariant(metrics []interfaces.ReplicaMetrics) map[string][]int
 // into a single Environment representing the variant's current operating state.
 // Returns error if required metrics are unavailable.
 func (a *QueueingModelAnalyzer) buildEnvironmentFromMetrics(
-	ctx context.Context,
 	variantName string,
-	metrics []interfaces.ReplicaMetrics,
+	metrics []*interfaces.ReplicaMetrics,
 ) (*tuner.Environment, error) {
 	if len(metrics) == 0 {
 		return nil, fmt.Errorf("no replica metrics for variant %s", variantName)
@@ -500,7 +530,7 @@ func (a *QueueingModelAnalyzer) buildEnvironmentFromMetrics(
 
 	// MaxBatchSize is per-deployment (same for all replicas of a variant),
 	// so we extract it once from the first replica that has it.
-	var maxBatchSize int64
+	maxBatchSize := int64(DefaultMaxBatchSize)
 	for _, rm := range metrics {
 		if rm.MaxBatchSize > 0 {
 			maxBatchSize = rm.MaxBatchSize
@@ -537,10 +567,6 @@ func (a *QueueingModelAnalyzer) buildEnvironmentFromMetrics(
 	avgTTFT := totalTTFT / float64(validPods)
 	avgITL := totalITL / float64(validPods)
 
-	if maxBatchSize <= 0 {
-		maxBatchSize = DefaultMaxBatchSize
-	}
-
 	// Convert arrival rate from requests/sec to requests/min for tuner
 	lambdaPerMinute := totalArrivalRate * 60.0
 
@@ -572,13 +598,14 @@ func (a *QueueingModelAnalyzer) createTuner(
 	ctx context.Context,
 	namespace string,
 	variantName string,
+	modelID string,
 	env *tuner.Environment,
 	filterConfig *tuner.FilterData,
 ) (*tuner.Tuner, error) {
 	logger := ctrl.LoggerFrom(ctx)
 
 	// Check if we have existing parameters
-	existingParams := a.paramStore.Get(namespace, variantName)
+	existingParams := a.getParams(modelID, namespace, variantName)
 
 	// Get base tuner config (uses user config or defaults)
 	tunerConfig := a.getTunerConfig(filterConfig, env)
@@ -592,7 +619,12 @@ func (a *QueueingModelAnalyzer) createTuner(
 			"beta", existingParams.Beta,
 			"gamma", existingParams.Gamma)
 
-		tunerConfig.ModelData.InitState = existingParams.State
+		stateVec := make([]float64, 3)
+		stateVec[tuner.StateIndexAlpha] = float64(existingParams.Alpha)
+		stateVec[tuner.StateIndexBeta] = float64(existingParams.Beta)
+		stateVec[tuner.StateIndexGamma] = float64(existingParams.Gamma)
+		tunerConfig.ModelData.InitState = stateVec
+
 		flatCov := flattenCovariance(existingParams.Covariance)
 		if flatCov != nil {
 			tunerConfig.ModelData.InitCovarianceMatrix = flatCov
@@ -603,7 +635,7 @@ func (a *QueueingModelAnalyzer) createTuner(
 			"variant", variantName,
 			"namespace", namespace)
 
-		state, err := a.guessInitState(ctx, env)
+		state, err := a.guessInitState(env)
 		if err != nil {
 			logger.V(1).Info("Failed to guess initial state, using defaults",
 				"variant", variantName,
@@ -689,57 +721,22 @@ func (a *QueueingModelAnalyzer) getTunerConfig(filterConfig *tuner.FilterData, e
 func (a *QueueingModelAnalyzer) storeParametersFromResults(
 	namespace string,
 	variantName string,
+	modelID string,
 	results *tuner.TunedResults,
 ) {
-	// Extract state vector and covariance matrix
-	// State vector has 3 elements: [alpha, beta, gamma]
-	stateVec := make([]float64, 3)
-	stateVec[tuner.StateIndexAlpha] = float64(results.ServiceParms.Alpha)
-	stateVec[tuner.StateIndexBeta] = float64(results.ServiceParms.Beta)
-	stateVec[tuner.StateIndexGamma] = float64(results.ServiceParms.Gamma)
-
+	// Extract covariance matrix
 	covariance := matrixToSlice2D(results.Covariance)
 
 	params := &LearnedParameters{
 		Alpha:       results.ServiceParms.Alpha,
 		Beta:        results.ServiceParms.Beta,
 		Gamma:       results.ServiceParms.Gamma,
-		LastUpdated: time.Now(),
 		NIS:         results.NIS,
-		State:       stateVec,
 		Covariance:  covariance,
+		LastUpdated: time.Now(),
 	}
 
-	a.paramStore.Set(namespace, variantName, params)
-}
-
-// flattenCovariance converts a 2D covariance matrix to a flat slice.
-func flattenCovariance(cov [][]float64) []float64 {
-	if len(cov) == 0 {
-		return nil
-	}
-	n := len(cov)
-	flat := make([]float64, 0, n*n)
-	for i := range n {
-		flat = append(flat, cov[i]...)
-	}
-	return flat
-}
-
-// matrixToSlice2D converts a gonum mat.Dense to a 2D slice.
-func matrixToSlice2D(m *mat.Dense) [][]float64 {
-	if m == nil {
-		return nil
-	}
-	rows, cols := m.Dims()
-	result := make([][]float64, rows)
-	for i := range rows {
-		result[i] = make([]float64, cols)
-		for j := 0; j < cols; j++ {
-			result[i][j] = m.At(i, j)
-		}
-	}
-	return result
+	a.setParams(modelID, namespace, variantName, params)
 }
 
 // getFactoredState multiplies each element in state by multiplier and returns the new slice.
@@ -765,7 +762,7 @@ func getFactoredState(state []float64, multiplier float64) []float64 {
 //   - gamma: KV cache memory access time per token
 //   - i_l: average input tokens
 //   - o_l: average output tokens
-func (a *QueueingModelAnalyzer) guessInitState(ctx context.Context, env *tuner.Environment) ([]float64, error) {
+func (a *QueueingModelAnalyzer) guessInitState(env *tuner.Environment) ([]float64, error) {
 	// Validate environment
 	if env == nil || !env.Valid() {
 		return nil, fmt.Errorf("invalid environment for guessing initial state")
@@ -835,4 +832,45 @@ func (a *QueueingModelAnalyzer) guessInitState(ctx context.Context, env *tuner.E
 
 	// Return state vector [alpha, beta, gamma]
 	return []float64{alpha, beta, gamma}, nil
+}
+
+// Update deletes non-existing models from paramStore[models]
+// and adds new models to the store
+func (a *QueueingModelAnalyzer) Update(currentModels map[string]bool) {
+	// delete non-existing models
+	deletedModels := []string{}
+	for modelKey := range a.modelsParameterStore {
+		if _, exists := currentModels[modelKey]; !exists {
+			deletedModels = append(deletedModels, modelKey)
+		}
+	}
+	for _, modelKey := range deletedModels {
+		delete(a.modelsParameterStore, modelKey)
+	}
+
+	// add new models
+	for modelKey := range currentModels {
+		if _, exists := a.modelsParameterStore[modelKey]; !exists {
+			a.modelsParameterStore[modelKey] = NewParameterStore()
+		}
+	}
+}
+
+// get parameters for a given model, namespace, and variant (nil if does not exist)
+func (a *QueueingModelAnalyzer) getParams(modelID, namespace, variantName string) (params *LearnedParameters) {
+	if pStore, exists := a.modelsParameterStore[modelID]; exists {
+		params = pStore.Get(namespace, variantName)
+	}
+	return params
+}
+
+// set parameters for a given model, namespace, and variant
+func (a *QueueingModelAnalyzer) setParams(modelID, namespace, variantName string, params *LearnedParameters) {
+	pStore := a.modelsParameterStore[modelID]
+	// this shouldn't happen as Update() makes sure that there are entries for all current models
+	if pStore == nil {
+		a.modelsParameterStore[modelID] = NewParameterStore()
+		pStore = a.modelsParameterStore[modelID]
+	}
+	pStore.Set(namespace, variantName, params)
 }
