@@ -245,7 +245,7 @@ jobs:
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: issue.number,
-                body: `🚀 **Full E2E tests triggered by ${comment}**\n\n[View the Kind E2E workflow run](${runUrl})`
+                body: `🚀 **Kind E2E (full)** triggered by \`${comment}\`\n\n[View the Kind E2E workflow run](${runUrl})`
               });
 
               core.setOutput('run_full', 'true');
