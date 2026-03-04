@@ -1,6 +1,6 @@
 module github.com/llm-d/llm-d-workload-variant-autoscaler
 
-go 1.25.0
+go 1.24.0
 
 require (
 	github.com/onsi/ginkgo/v2 v2.28.1
@@ -19,6 +19,7 @@ require (
 	github.com/Masterminds/semver/v3 v3.4.0 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/go-viper/mapstructure/v2 v2.4.0 // indirect
+	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/pelletier/go-toml/v2 v2.2.4 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/sagikazarmark/locafero v0.11.0 // indirect
