@@ -158,6 +158,90 @@ func (a *QueueingModelAnalyzer) getSLOTarget(
 	return a.guessSLOFromMetrics(ctx, namespace, modelID, config, metrics)
 }
 
+// guessSLOFromMetrics infers SLO targets from the queueing model when no
+// explicit SLO configuration is provided.
+//
+// The SLO is defined using the idle-latency multiplier approach: the queueing
+// delay (T_iter) is allowed to inflate by a fixed multiplier k relative to the
+// idle baseline α, while deterministic work components remain at their true cost.
+//
+// Formulas (all values in milliseconds):
+//
+//	TargetTTFT = k×α + (β+γ)×i_l
+//	TargetITL  = k×α + β + γ×(i_l + (o_l+1)/2)
+//
+// This gives exact utilization correspondence: ρ = 1 - 1/k.
+// k is a fixed constant (not dependent on system state) because SLOs are contracts.
+//
+// When learned parameters are unavailable, falls back to observed latencies
+// with a headroom multiplier, capped at reasonable maximums.
+func (a *QueueingModelAnalyzer) guessSLOFromMetrics(
+	ctx context.Context,
+	namespace string,
+	modelID string,
+	config *QueueingModelConfig,
+	metrics []interfaces.ReplicaMetrics,
+) *SLOTarget {
+	logger := ctrl.LoggerFrom(ctx)
+
+	wm := aggregateWorkloadMetrics(metrics)
+	if wm == nil {
+		return nil
+	}
+
+	// Get the SLO multiplier k
+	k := config.SLOMultiplier
+	if k <= 1.0 {
+		k = DefaultSLOMultiplier
+	}
+
+	// Try theory-based SLO: find a variant with learned parameters
+	variantMetrics := groupMetricsByVariant(metrics)
+	for variantName := range variantMetrics {
+		params := a.getParams(modelID, namespace, variantName)
+		if params == nil {
+			continue
+		}
+
+		alpha := float64(params.Alpha)
+		beta := float64(params.Beta)
+		gamma := float64(params.Gamma)
+
+		if alpha <= 0 || beta <= 0 || gamma <= 0 {
+			continue
+		}
+
+		// T_iter at SLO utilization: k × α = α/(1-ρ) where ρ = 1-1/k
+		tIterSLO := k * alpha
+
+		// Deterministic work — NOT inflated by k
+		prefillWork := (beta + gamma) * wm.avgInputTokens
+		decodeWork := beta + gamma*(wm.avgInputTokens+(wm.avgOutputTokens+1.0)/2.0)
+
+		ttftSLO := tIterSLO + prefillWork
+		itlSLO := tIterSLO + decodeWork
+
+		logger.V(1).Info("Inferred SLO from queueing model",
+			"variant", variantName,
+			"k", k,
+			"alpha", alpha, "beta", beta, "gamma", gamma,
+			"avgInputTokens", wm.avgInputTokens,
+			"avgOutputTokens", wm.avgOutputTokens,
+			"TargetTTFT_ms", ttftSLO,
+			"TargetITL_ms", itlSLO,
+		)
+
+		return &SLOTarget{
+			TargetTTFT: float32(ttftSLO),
+			TargetITL:  float32(itlSLO),
+		}
+	}
+
+	// Fallback: use observed latencies with headroom when learned params
+	// are not yet available (cold start / early tuning cycles)
+	return fallbackSLOFromObservations(ctx, wm)
+}
+
 func (a *QueueingModelAnalyzer) updateVariantParameters(
 	ctx context.Context,
 	namespace string,
@@ -257,7 +341,7 @@ func (a *QueueingModelAnalyzer) computeAllVariantCapacities(
 			ReplicaCount:    readyCount,
 			PendingReplicas: variantState.PendingReplicas,
 
-			PerReplicaCapacity: 1.0,
+			PerReplicaCapacity: 1.0, // TODO: caller should handle variants withoout results, instead of relying on absolute values
 			TotalCapacity:      1.0,
 			TotalDemand:        0.0,
 			Utilization:        0.0,
@@ -381,90 +465,6 @@ func (a *QueueingModelAnalyzer) computeAllVariantCapacities(
 	return variantCapacities
 }
 
-// guessSLOFromMetrics infers SLO targets from the queueing model when no
-// explicit SLO configuration is provided.
-//
-// The SLO is defined using the idle-latency multiplier approach: the queueing
-// delay (T_iter) is allowed to inflate by a fixed multiplier k relative to the
-// idle baseline α, while deterministic work components remain at their true cost.
-//
-// Formulas (all values in milliseconds):
-//
-//	TargetTTFT = k×α + (β+γ)×i_l
-//	TargetITL  = k×α + β + γ×(i_l + (o_l+1)/2)
-//
-// This gives exact utilization correspondence: ρ = 1 - 1/k.
-// k is a fixed constant (not dependent on system state) because SLOs are contracts.
-//
-// When learned parameters are unavailable, falls back to observed latencies
-// with a headroom multiplier, capped at reasonable maximums.
-func (a *QueueingModelAnalyzer) guessSLOFromMetrics(
-	ctx context.Context,
-	namespace string,
-	modelID string,
-	config *QueueingModelConfig,
-	metrics []interfaces.ReplicaMetrics,
-) *SLOTarget {
-	logger := ctrl.LoggerFrom(ctx)
-
-	wm := aggregateWorkloadMetrics(metrics)
-	if wm == nil {
-		return nil
-	}
-
-	// Get the SLO multiplier k
-	k := config.SLOMultiplier
-	if k <= 1.0 {
-		k = DefaultSLOMultiplier
-	}
-
-	// Try theory-based SLO: find a variant with learned parameters
-	variantMetrics := groupMetricsByVariant(metrics)
-	for variantName := range variantMetrics {
-		params := a.getParams(modelID, namespace, variantName)
-		if params == nil {
-			continue
-		}
-
-		alpha := float64(params.Alpha)
-		beta := float64(params.Beta)
-		gamma := float64(params.Gamma)
-
-		if alpha <= 0 || beta <= 0 || gamma <= 0 {
-			continue
-		}
-
-		// T_iter at SLO utilization: k × α = α/(1-ρ) where ρ = 1-1/k
-		tIterSLO := k * alpha
-
-		// Deterministic work — NOT inflated by k
-		prefillWork := (beta + gamma) * wm.avgInputTokens
-		decodeWork := beta + gamma*(wm.avgInputTokens+(wm.avgOutputTokens+1.0)/2.0)
-
-		ttftSLO := tIterSLO + prefillWork
-		itlSLO := tIterSLO + decodeWork
-
-		logger.V(1).Info("Inferred SLO from queueing model",
-			"variant", variantName,
-			"k", k,
-			"alpha", alpha, "beta", beta, "gamma", gamma,
-			"avgInputTokens", wm.avgInputTokens,
-			"avgOutputTokens", wm.avgOutputTokens,
-			"TargetTTFT_ms", ttftSLO,
-			"TargetITL_ms", itlSLO,
-		)
-
-		return &SLOTarget{
-			TargetTTFT: float32(ttftSLO),
-			TargetITL:  float32(itlSLO),
-		}
-	}
-
-	// Fallback: use observed latencies with headroom when learned params
-	// are not yet available (cold start / early tuning cycles)
-	return fallbackSLOFromObservations(ctx, wm)
-}
-
 // createTunerForVariant creates a new tuner instance for a variant.
 // If parameters exist in the store, uses the stored state and covariance.
 // Otherwise, attempts to guess initial state from environment metrics.
@@ -568,36 +568,6 @@ func (a *QueueingModelAnalyzer) emptyResult(input interfaces.AnalyzerInput) *int
 	}
 }
 
-// fallbackSLOFromObservations creates SLO targets from observed TTFT/ITL
-// with a headroom multiplier and reasonable caps. Used during cold start
-// before the Kalman filter has learned hardware parameters.
-func fallbackSLOFromObservations(
-	ctx context.Context,
-	wm *workloadMetrics,
-) *SLOTarget {
-	if wm.avgTTFT <= 0 || wm.avgITL <= 0 {
-		return nil
-	}
-
-	logger := ctrl.LoggerFrom(ctx)
-
-	// Convert seconds → milliseconds and apply headroom
-	ttft := math.Min(wm.avgTTFT*1000.0*DefaultFallbackHeadroom, DefaultMaxFallbackTTFT)
-	itl := math.Min(wm.avgITL*1000.0*DefaultFallbackHeadroom, DefaultMaxFallbackITL)
-
-	logger.V(1).Info("Using fallback SLO from observations",
-		"observedTTFT_s", wm.avgTTFT,
-		"observedITL_s", wm.avgITL,
-		"TargetTTFT_ms", ttft,
-		"TargetITL_ms", itl,
-	)
-
-	return &SLOTarget{
-		TargetTTFT: float32(ttft),
-		TargetITL:  float32(itl),
-	}
-}
-
 // workloadMetrics holds aggregated workload characteristics across replicas.
 type workloadMetrics struct {
 	avgInputTokens  float64
@@ -633,6 +603,36 @@ func aggregateWorkloadMetrics(metrics []interfaces.ReplicaMetrics) *workloadMetr
 		avgOutputTokens: totalOutputToks / float64(validPods),
 		avgTTFT:         totalTTFT / float64(validPods),
 		avgITL:          totalITL / float64(validPods),
+	}
+}
+
+// fallbackSLOFromObservations creates SLO targets from observed TTFT/ITL
+// with a headroom multiplier and reasonable caps. Used during cold start
+// before the Kalman filter has learned hardware parameters.
+func fallbackSLOFromObservations(
+	ctx context.Context,
+	wm *workloadMetrics,
+) *SLOTarget {
+	if wm.avgTTFT <= 0 || wm.avgITL <= 0 {
+		return nil
+	}
+
+	logger := ctrl.LoggerFrom(ctx)
+
+	// Convert seconds → milliseconds and apply headroom
+	ttft := math.Min(wm.avgTTFT*1000.0*DefaultFallbackHeadroom, DefaultMaxFallbackTTFT)
+	itl := math.Min(wm.avgITL*1000.0*DefaultFallbackHeadroom, DefaultMaxFallbackITL)
+
+	logger.V(1).Info("Using fallback SLO from observations",
+		"observedTTFT_s", wm.avgTTFT,
+		"observedITL_s", wm.avgITL,
+		"TargetTTFT_ms", ttft,
+		"TargetITL_ms", itl,
+	)
+
+	return &SLOTarget{
+		TargetTTFT: float32(ttft),
+		TargetITL:  float32(itl),
 	}
 }
 
