@@ -146,6 +146,45 @@ var _ = Describe("PrometheusSource", func() {
 			Expect(result.Values[0].Value).To(Equal(0.75))
 			Expect(result.Values[0].Labels["pod"]).To(Equal("test-pod-1"))
 		})
+
+		It("should escape params so PromQL is safe (no injection)", func() {
+			var capturedQuery string
+			mockAPI.queryFunc = func(ctx context.Context, query string, ts time.Time, opts ...v1.Option) (model.Value, v1.Warnings, error) {
+				capturedQuery = query
+				return model.Vector{
+					&model.Sample{
+						Metric:    model.Metric{"pod": "p1"},
+						Value:     0.5,
+						Timestamp: model.TimeFromUnix(time.Now().Unix()),
+					},
+				}, nil, nil
+			}
+
+			err := registry.Register(sourcepkg.QueryTemplate{
+				Name:        "injection_test",
+				Type:        sourcepkg.QueryTypePromQL,
+				Template:    `metric{namespace="{{.namespace}}",model_name="{{.modelID}}"}`,
+				Params:      []string{"namespace", "modelID"},
+				Description: "Test escaping",
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Params that would break PromQL or inject labels if unescaped
+			params := map[string]string{
+				"namespace": `safe-ns`,
+				"modelID":   `x",namespace="other"`,
+			}
+			_, err = source.Refresh(ctx, sourcepkg.RefreshSpec{
+				Queries: []string{"injection_test"},
+				Params:  params,
+			})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(capturedQuery).NotTo(BeEmpty())
+			// Escaped: quote and backslash in modelID become \"
+			Expect(capturedQuery).To(ContainSubstring(`model_name="x\",namespace=\"other\""`))
+			// Should not contain unescaped injection (extra namespace=)
+			Expect(capturedQuery).NotTo(MatchRegexp(`namespace="other"`))
+		})
 	})
 
 	Describe("Caching", func() {

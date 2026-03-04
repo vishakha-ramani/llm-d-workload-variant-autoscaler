@@ -238,6 +238,10 @@ func (e *Engine) processInactiveVariant(ctx context.Context, va wvav1alpha1.Vari
 	// Use EPP source from registry
 	eppSource := e.Datastore.PoolGetMetricsSource(pool.Name)
 	if eppSource == nil {
+		logger.Info("Scale-from-zero: skipping VA, EPP metrics source not found in datastore",
+			"va", va.Name,
+			"namespace", va.Namespace,
+			"pool", pool.Name)
 		return errors.New("endpointpicker metrics source not found in datastore")
 	}
 
@@ -263,7 +267,11 @@ func (e *Engine) processInactiveVariant(ctx context.Context, va wvav1alpha1.Vari
 	}
 
 	if !pendingRequestExist {
-		logger.V(logging.DEBUG).Info("No pending requests found in the flowcontrol queue - skipping scaling up from zero")
+		// Scale-from-zero loop runs every 100ms; log at DEBUG to avoid flooding (10/sec per inactive VA).
+		logger.V(logging.DEBUG).Info("Scale-from-zero: skipping VA, no pending requests in flow control queue",
+			"va", va.Name,
+			"namespace", va.Namespace,
+			"modelID", va.Spec.ModelID)
 		return nil
 	}
 
@@ -352,6 +360,13 @@ func (e *Engine) processInactiveVariant(ctx context.Context, va wvav1alpha1.Vari
 	common.DecisionTrigger <- event.GenericEvent{
 		Object: &va,
 	}
+
+	// Log scaling decision for E2E and operators (mirrors saturation engine "Applied ... via shared cache").
+	logger.Info("Scale-from-zero decision written to cache",
+		"va", va.Name,
+		"namespace", va.Namespace,
+		"targetReplicas", targetWorkloadReplicas,
+		"reason", reason)
 
 	return nil
 }

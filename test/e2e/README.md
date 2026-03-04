@@ -61,7 +61,7 @@ make test-e2e-smoke
 make test-e2e-full
 
 # Run specific test
-FOCUS="Basic VA lifecycle" make test-e2e
+FOCUS="Basic VA lifecycle" make test-e2e-smoke
 ```
 
 ### Environment Configuration

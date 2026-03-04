@@ -8,8 +8,7 @@ WVA has a multi-layered testing strategy:
 
 1. **Unit Tests** - Fast, isolated tests for individual packages and functions
 2. **Integration Tests** - Tests for component interactions within the controller
-3. **E2E Tests (Saturation-Based)** - Full system tests with emulated infrastructure on Kind
-4. **E2E Tests (OpenShift)** - Real-world tests with actual vLLM deployments on OpenShift
+3. **E2E Tests** - Environment-agnostic end-to-end tests (Kind emulated or OpenShift), with smoke and full tiers
 
 ## Unit Tests
 
@@ -135,170 +134,94 @@ var _ = AfterSuite(func() {
 
 ## End-to-End Tests
 
-WVA provides two E2E test suites for different testing scenarios.
+WVA provides a **single consolidated E2E suite** that runs on multiple environments (Kind with emulated GPUs, or OpenShift/kubernetes with real infrastructure). Tests are environment-agnostic and parameterized via environment variables; they create VA, HPA, and model services dynamically as part of the test workflow.
 
-### Saturation-Based E2E Tests (Kind)
+- **Location**: `test/e2e/`
+- **Environments**: Kind (emulated), OpenShift, or generic Kubernetes
+- **Tiers**: Smoke (~5–10 min) for PRs; full suite (~15–25 min) for comprehensive validation
 
-- **Purpose**: Fast, isolated testing with emulated infrastructure
-- **Location**: `test/e2e-saturation-based/`
-- **Environment**: Local Kind cluster with GPU emulation
-- **Duration**: ~15-25 minutes
+### Infra-Only Setup (Required Before Running Tests)
 
-#### Quick Start
+Tests expect **only** the WVA controller and llm-d infrastructure to be deployed; they create VariantAutoscaling resources, HPAs, and model services themselves. Use the install script in **infra-only** mode:
 
 ```bash
-# Run all saturation-based E2E tests
-make test-e2e
-
-# Run specific test suite
-make test-e2e FOCUS="Single VariantAutoscaling"
-make test-e2e FOCUS="Multiple VariantAutoscalings"
-
-# Run specific test case
-make test-e2e FOCUS="should scale up when saturation is detected"
+# From repository root: deploy only WVA + llm-d infrastructure (no VA/HPA/model services)
+cd deploy
+export ENVIRONMENT="kind-emulator"   # or "openshift", "kubernetes"
+export INFRA_ONLY=true
+./install.sh
+# Or: ./install.sh --infra-only
 ```
 
-#### What These Tests Validate
-
-- ✅ Saturation detection via KV cache and queue metrics
-- ✅ Scale-up recommendations based on thresholds
-- ✅ HPA integration with `wva_desired_replicas` metric
-- ✅ Multi-variant scaling with cost optimization
-- ✅ Deployment scaling and replica stabilization
-
-#### Prerequisites
-
-- Docker installed and running
-- Kind (installed automatically if missing)
-- 8GB+ RAM, 4+ CPU cores recommended
-- **No GPU hardware required** - uses emulation
-
-**Note:** For running multiple test suites in parallel, use the [multi-controller isolation feature](../user-guide/multi-controller-isolation.md) to prevent metric conflicts.
-
-#### Test Environment
-
-The test suite automatically creates:
-- Kind cluster with 3 nodes and emulated GPUs
+This deploys:
 - WVA controller
-- Emulated llm-d infrastructure
-- Prometheus monitoring stack
-- Test deployments with VariantAutoscaling resources
+- llm-d infrastructure (Gateway, CRDs, RBAC, EPP)
+- Prometheus stack and Prometheus Adapter (or KEDA when `SCALER_BACKEND=keda`)
+- **No** VariantAutoscaling, HPA, or model services (tests create these)
 
-#### Test Configuration
-
-Key configuration constants in `test/e2e-saturation-based/e2e_saturation_test.go`:
-
-```go
-// Load parameters
-loadRatePerSecond   = 8    // requests/second
-inputTokens         = 128  // tokens per request
-outputTokens        = 128  // tokens per request
-
-// Saturation thresholds
-KvCacheThreshold     = 0.7  // 70% KV-cache utilization
-QueueLengthThreshold = 10.0 // 10+ queued requests
-
-// Cost configuration (multi-variant tests)
-h100Cost = 50.0  // H100: $50/hr
-a100Cost = 30.0  // A100: $30/hr
-```
-
-See the [Saturation-Based E2E Tests README](../../test/e2e-saturation-based/README.md) for comprehensive documentation.
-
-#### Parallel Test Execution
-
-Run multiple E2E test suites simultaneously using controller instance isolation:
+Alternatively, use the Makefile to deploy infra and run tests in one go:
 
 ```bash
-# Terminal 1: Run test suite A
-CONTROLLER_INSTANCE=test-a make test-e2e
+# Kind: create cluster, deploy infra, run smoke tests
+make test-e2e-smoke-with-setup
 
-# Terminal 2: Run test suite B (in parallel)
-CONTROLLER_INSTANCE=test-b make test-e2e
+# Kind: deploy infra only (if cluster already exists), then run full suite
+make deploy-e2e-infra
+make test-e2e-full
 ```
 
-Each test suite:
-- Deploys its own WVA controller with unique instance ID
-- Creates VAs labeled with matching `controller_instance`
-- HPA reads metrics filtered by `controller_instance` label
-- No interference between test suites
+See the [E2E Test Suite README](../../test/e2e/README.md) for full configuration options and examples.
 
-See [Multi-Controller Isolation](../user-guide/multi-controller-isolation.md) for details.
-
-### OpenShift E2E Tests
-
-- **Purpose**: Real-world validation with actual vLLM deployments
-- **Location**: `test/e2e-openshift/`
-- **Environment**: OpenShift cluster with GPU hardware
-- **Duration**: ~30-45 minutes (depending on cluster and load)
-
-#### Quick Start
+### Quick Start
 
 ```bash
-# Set KUBECONFIG to your OpenShift cluster
-export KUBECONFIG=/path/to/kubeconfig
+# Smoke tests (recommended for every PR)
+make test-e2e-smoke
 
-# Run all OpenShift E2E tests
-make test-e2e-openshift
+# Full suite (on-demand)
+make test-e2e-full
 
-# Run with custom configuration
-make test-e2e-openshift \
-  LLMD_NAMESPACE=llmd-stack \
-  DEPLOYMENT=my-vllm-deployment \
-  REQUEST_RATE=20 \
-  NUM_PROMPTS=3000
+# OpenShift: point at cluster and run
+export KUBECONFIG=/path/to/openshift/kubeconfig
+export ENVIRONMENT=openshift
+make test-e2e-smoke
+# or make test-e2e-full
+
+# Run a specific test by name
+FOCUS="Basic VA lifecycle" make test-e2e-smoke
 ```
 
-#### What These Tests Validate
+### What the Suite Validates
 
-- ✅ Real vLLM deployment scaling under actual load
-- ✅ ShareGPT dataset load generation
-- ✅ Production-like HPA integration
-- ✅ Prometheus metrics collection
-- ✅ Multi-namespace operation
+- **Smoke (label `smoke`)**: Infrastructure readiness, basic VA lifecycle, target condition validation
+- **Full (label `full`)**: Saturation scaling (single and multiple VAs), scale-from-zero, scale-to-zero (when `SCALE_TO_ZERO_ENABLED=true`), limiter, pod scraping, parallel load scale-up
 
-#### Prerequisites
+### Configuration
 
-- OpenShift cluster (OCP 4.12+) with GPU nodes
-- `oc` CLI configured and authenticated
-- Cluster admin permissions
-- Pre-deployed infrastructure:
-  - WVA controller
-  - llm-d infrastructure
-  - Prometheus/Thanos
-  - vLLM deployment
+Key environment variables (see [E2E Test Suite README](../../test/e2e/README.md) for the full list):
 
-#### Test Parameters
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ENVIRONMENT` | `kind-emulator` | `kind-emulator`, `openshift`, or `kubernetes` |
+| `USE_SIMULATOR` | `true` | Emulated GPUs (true) or real vLLM (false) |
+| `SCALE_TO_ZERO_ENABLED` | `false` | Enable scale-to-zero tests (Kind supports both enabled and disabled) |
+| `SCALER_BACKEND` | `prometheus-adapter` | `prometheus-adapter` or `keda` (KEDA only for kind-emulator) |
+| `REQUEST_RATE` | `8` | Load generation: requests per second |
+| `NUM_PROMPTS` | `1000` | Load generation: total prompts |
 
-Configurable via environment variables or Makefile:
-
-```bash
-CONTROLLER_NAMESPACE=workload-variant-autoscaler-system
-LLMD_NAMESPACE=llm-d-inference-scheduling
-GATEWAY_NAME=infra-inference-scheduling-inference-gateway
-MODEL_ID=unsloth/Meta-Llama-3.1-8B
-DEPLOYMENT=ms-inference-scheduling-llm-d-modelservice-decode
-REQUEST_RATE=20        # Requests per second
-NUM_PROMPTS=3000       # Total prompts to generate
-```
-
-Additional load generation constants are configured in the test code:
-- **`maxTokens=400`**: Token limit for completion requests (sustains GPU load for reliable scale-up detection)
-- **`curlTimeoutSeconds=180`**: Request timeout (accommodates longer response times with higher token limits)
-
-See the [OpenShift E2E Tests README](../../test/e2e-openshift/README.md) for comprehensive documentation.
+For running multiple test runs in parallel, use [multi-controller isolation](../user-guide/multi-controller-isolation.md) (`CONTROLLER_INSTANCE`).
 
 ## Test Comparison Matrix
 
-| Aspect | Unit Tests | Integration Tests | Saturation E2E (Kind) | OpenShift E2E |
-|--------|-----------|-------------------|----------------------|---------------|
-| **Speed** | ⚡ Fast (<1min) | 🚀 Fast (1-3min) | 🏃 Medium (15-25min) | 🐢 Slow (30-45min) |
-| **Isolation** | ✅ Complete | ⚠️ Partial | ✅ Complete | ❌ Shared cluster |
-| **GPU Required** | ❌ No | ❌ No | ❌ No (emulated) | ✅ Yes |
-| **Infrastructure** | ❌ None | 🔧 envtest | 🐳 Kind cluster | ☁️ OpenShift cluster |
-| **Realism** | ⭐ Low | ⭐⭐ Medium | ⭐⭐⭐ High | ⭐⭐⭐⭐ Production-like |
-| **CI-Friendly** | ✅ Yes | ✅ Yes | ✅ Yes | ⚠️ Requires cluster |
-| **Local Dev** | ✅ Yes | ✅ Yes | ✅ Yes | ⚠️ Cluster access needed |
+| Aspect | Unit Tests | Integration Tests | E2E Consolidated (Kind emulated) | E2E Consolidated (OpenShift) |
+|--------|-----------|-------------------|----------------------------------|------------------------------|
+| **Speed** | Fast (<1min) | Fast (1-3min) | Smoke 5-10min / Full 15-25min | Smoke 5-10min / Full 15-25min |
+| **Isolation** | Complete | Partial | Complete (Kind) | Shared cluster |
+| **GPU Required** | No | No | No (emulated) | Yes (real) |
+| **Infrastructure** | None | envtest | Kind + infra-only deploy | OpenShift + infra-only deploy |
+| **Realism** | Low | Medium | High (emulated) | Production-like |
+| **CI-Friendly** | Yes | Yes | Yes | Requires cluster |
+| **Local Dev** | Yes | Yes | Yes | Cluster access needed |
 
 ## Continuous Integration
 
@@ -316,15 +239,13 @@ Runs on every pull request:
 - Build verification
 - Code coverage reporting
 
-#### E2E Saturation Tests Workflow
+#### E2E Tests Workflow
 
-**File**: `.github/workflows/ci-e2e-saturation.yaml` (if exists)
+E2E workflows run the **consolidated suite** (`test/e2e/`):
+- **Smoke** (`make test-e2e-smoke`): Fast validation on Kind (or OpenShift when `ENVIRONMENT=openshift`)
+- **Full** (`make test-e2e-full`): Full suite; typically run with infra deployed via `deploy-e2e-infra` or equivalent
 
-Runs saturation-based E2E tests on Kind:
-- Triggered on PR or manual workflow dispatch
-- Creates isolated Kind cluster
-- Runs full E2E test suite
-- Cleans up resources after completion
+Infrastructure is deployed in **infra-only** mode (WVA + llm-d only); tests create VA, HPA, and model services dynamically.
 
 #### OpenShift E2E Tests Workflow
 
@@ -336,6 +257,21 @@ Runs OpenShift E2E tests on dedicated cluster:
 - Runs multi-model tests
 - On failure: automatically scales down GPU workloads while preserving debugging resources (VA, HPA, logs)
 - Smart resource management frees GPUs for other PRs without manual intervention
+
+#### Triggering E2E via PR Comments
+
+You can trigger specific e2e runs by commenting on a PR:
+
+| Comment | Workflow | Who can use | Effect |
+|--------|----------|-------------|--------|
+| **`/trigger-e2e-full`** | `ci-pr-checks.yaml` | Anyone with PR access | Runs the **full** e2e suite on Kind (instead of smoke only). Aliases: `/test-e2e-full`, `/test-full`. |
+| **`/ok-to-test`** | `ci-e2e-openshift.yaml` | Maintainers/admins only | Approves running **OpenShift e2e** on a **fork PR**. Fork PRs do not run this workflow automatically; a maintainer must comment `/ok-to-test` after reviewing the code. |
+| **`/retest`** | `ci-e2e-openshift.yaml` | Maintainers/admins only | Re-triggers the OpenShift e2e workflow (e.g. after a run failure or to re-run with latest code). |
+
+**When to use:**
+
+- **Full e2e on Kind**: Comment `/trigger-e2e-full` when you want the full e2e suite to run on your PR (e.g. after making scaling or saturation changes). By default, PRs only run smoke e2e.
+- **Fork PRs**: If you opened a PR from a fork, OpenShift e2e will not run until a maintainer or admin comments `/ok-to-test`. Contributors should wait for that approval; maintainers use `/ok-to-test` after reviewing the PR.
 
 ### Running CI Tests Locally
 
@@ -358,12 +294,13 @@ make docker-build
 #### Simulate E2E CI
 
 ```bash
-# Run saturation-based E2E (matches CI)
-make test-e2e
+# Deploy infra (infra-only), then run smoke or full suite
+make deploy-e2e-infra
+make test-e2e-smoke
+# or: make test-e2e-full
 
-# Run with specific Kubernetes version
-export K8S_VERSION=v1.31.0
-make test-e2e
+# One-shot: create cluster, deploy infra, run smoke tests
+make test-e2e-smoke-with-setup
 ```
 
 ## Testing Best Practices
@@ -501,18 +438,16 @@ dlv test ./internal/controller/... -- -ginkgo.v
 #### View Test Logs
 
 ```bash
-# Saturation-based tests
-go test ./test/e2e-saturation-based/ -v -ginkgo.v
-
-# OpenShift tests
-go test ./test/e2e-openshift/ -v -ginkgo.v -timeout 45m
+# Consolidated E2E suite (smoke or full)
+go test ./test/e2e/ -v -ginkgo.v -ginkgo.label-filter="smoke"
+go test ./test/e2e/ -v -ginkgo.v -ginkgo.label-filter="full && !flaky" -timeout 35m
 ```
 
 #### Access Test Cluster
 
 ```bash
-# For Kind E2E tests
-export KUBECONFIG=$(kind get kubeconfig-path --name wva-e2e)
+# For Kind E2E tests (default cluster name: kind-wva-gpu-cluster or from CLUSTER_NAME)
+export KUBECONFIG=~/.kube/config   # or path from kind get kubeconfig
 kubectl get pods -A
 kubectl logs -n workload-variant-autoscaler-system deployment/workload-variant-autoscaler-controller-manager
 
@@ -524,14 +459,11 @@ oc logs -n workload-variant-autoscaler-system deployment/workload-variant-autosc
 #### Keep Cluster Alive After Failure
 
 ```bash
-# Saturation-based tests - manually inspect after failure
-make test-e2e
-# On failure, cluster remains available
-export KUBECONFIG=/tmp/wva-e2e-*/kubeconfig
-kubectl get all -A
-
-# Clean up manually when done
-kind delete cluster --name wva-e2e
+# Run tests; on failure, cluster is kept by default (DELETE_CLUSTER=false)
+make test-e2e-smoke-with-setup
+# Inspect: kubectl get all -A
+# To delete cluster after: DELETE_CLUSTER=true make test-e2e-smoke-with-setup
+# Or manually: kind delete cluster --name <CLUSTER_NAME>
 ```
 
 ### Common Test Failures
@@ -594,17 +526,17 @@ kubectl top nodes
 
 ### Load Testing
 
-For load testing, use the provided load generation jobs:
+For load testing, use the consolidated E2E suite with custom load parameters:
 
 ```bash
-# Low load (should stay at 1 replica)
-REQUEST_RATE=8 NUM_PROMPTS=2000 make test-e2e-openshift
+# Kind (emulated): low / medium / heavy load
+REQUEST_RATE=8 NUM_PROMPTS=2000 make test-e2e-full
+REQUEST_RATE=20 NUM_PROMPTS=3000 make test-e2e-full
+REQUEST_RATE=40 NUM_PROMPTS=5000 make test-e2e-full
 
-# Medium load (should scale to 2 replicas)
-REQUEST_RATE=20 NUM_PROMPTS=3000 make test-e2e-openshift
-
-# Heavy load (may scale to 3+ replicas)
-REQUEST_RATE=40 NUM_PROMPTS=5000 make test-e2e-openshift
+# OpenShift (real cluster)
+export ENVIRONMENT=openshift
+REQUEST_RATE=20 NUM_PROMPTS=3000 make test-e2e-full
 ```
 
 ### Stress Testing
@@ -649,11 +581,10 @@ When contributing, please ensure:
 4. ✅ **Tests are documented** - explain what is being tested and why
 5. ✅ **Tests follow naming conventions** - use descriptive names
 6. ✅ **Tests clean up resources** - no resource leaks in tests
-7. ✅ **Tests pass locally before pushing** - run `make test` and `make test-e2e`
+7. ✅ **Tests pass locally before pushing** - run `make test` and `make test-e2e-smoke` (or `make test-e2e-full`)
 
 ## Related Documentation
 
 - [Development Guide](development.md) - Development environment setup
-- [Saturation-Based E2E Tests README](../../test/e2e-saturation-based/README.md) - Kind E2E tests
-- [OpenShift E2E Tests README](../../test/e2e-openshift/README.md) - OpenShift E2E tests
+- [E2E Test Suite README](../../test/e2e/README.md) - Consolidated E2E tests (Kind, OpenShift, infra-only setup)
 - [Contributing Guide](../../CONTRIBUTING.md) - Contribution guidelines

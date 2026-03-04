@@ -1,7 +1,7 @@
 # Image URL to use all building/pushing image targets
 IMAGE_TAG_BASE ?= ghcr.io/llm-d
 IMG_TAG ?= latest
-IMG ?= $(IMAGE_TAG_BASE)/workload-variant-autoscaler:$(IMG_TAG)
+IMG ?= $(IMAGE_TAG_BASE)/llm-d-workload-variant-autoscaler:$(IMG_TAG)
 KIND_ARGS ?= -t mix -n 3 -g 2   # Default: 3 nodes, 2 GPUs per node, mixed vendors
 CLUSTER_GPU_TYPE ?= nvidia-mix
 CLUSTER_NODES ?= 3
@@ -157,39 +157,6 @@ undeploy-wva-on-k8s:
 # - IMAGE_BUILD_SKIP=true: Skip building the WVA docker image during test setup.
 # - INFRA_SETUP_SKIP=true: Skip setting up the llm-d and the WVA controller manager during test setup. Reload the docker image if necessary.
 # - INFRA_TEARDOWN_SKIP=true: Skip tearing down the Kind cluster during test teardown.
-# DEPRECATED: Use test-e2e-smoke or test-e2e-full instead
-# This target uses the old test/e2e-saturation-based/ suite
-# Will be removed after migration to consolidated tests is complete
-.PHONY: test-e2e
-test-e2e: manifests generate fmt vet ## [DEPRECATED] Run the e2e tests. Expected an isolated environment using Kind. Use test-e2e-smoke or test-e2e-full instead.
-	@command -v $(KIND) >/dev/null 2>&1 || { \
-		echo "Kind is not installed. Please install Kind manually."; \
-		exit 1; \
-	}
-	$(eval FOCUS_ARGS := $(if $(FOCUS),-ginkgo.focus="$(FOCUS)",))
-	$(eval SKIP_ARGS := $(if $(SKIP),-ginkgo.skip="$(SKIP)",))
-	export COLLECTOR_V2=1 KUBECONFIG=$(KUBECONFIG) K8S_EXPECTED_VERSION=$(K8S_VERSION) && go test ./test/e2e-saturation-based/ -timeout 60m -v -ginkgo.v $(FOCUS_ARGS) $(SKIP_ARGS)
-
-# DEPRECATED: Use test-e2e-full with ENVIRONMENT=openshift instead
-# This target uses the old test/e2e-openshift/ suite
-# Will be removed after migration to consolidated tests is complete
-# E2E tests on OpenShift cluster
-# Supports KUBECONFIG or in-cluster authentication (for self-hosted runners).
-.PHONY: test-e2e-openshift
-test-e2e-openshift: ## [DEPRECATED] Run the e2e tests on OpenShift. Supports KUBECONFIG or in-cluster auth. Use test-e2e-full with ENVIRONMENT=openshift instead.
-	@echo "Running e2e tests on OpenShift cluster..."
-	$(eval FOCUS_ARGS := $(if $(FOCUS),-ginkgo.focus="$(FOCUS)",))
-	$(eval SKIP_ARGS := $(if $(SKIP),-ginkgo.skip="$(SKIP)",))
-
-	CONTROLLER_NAMESPACE=$(CONTROLLER_NAMESPACE) \
-	MONITORING_NAMESPACE=$(MONITORING_NAMESPACE) \
-	LLMD_NAMESPACE=$(LLMD_NAMESPACE) \
-	GATEWAY_NAME=$(GATEWAY_NAME) \
-	MODEL_ID=$(MODEL_ID) \
-	DEPLOYMENT=$(DEPLOYMENT) \
-	REQUEST_RATE=$(REQUEST_RATE) \
-	NUM_PROMPTS=$(NUM_PROMPTS) \
-	go test ./test/e2e-openshift/ -timeout 50m -v -ginkgo.v $(FOCUS_ARGS) $(SKIP_ARGS)
 
 # Consolidated e2e test targets (environment-agnostic)
 # These targets use the test/e2e/ suite that works on any Kubernetes cluster

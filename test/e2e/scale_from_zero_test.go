@@ -317,7 +317,16 @@ var _ = PDescribe("Scale-From-Zero Feature", Label("smoke", "full"), Ordered, fu
 
 				optimized := va.Status.DesiredOptimizedAlloc.NumReplicas
 
+				metricsCond := variantautoscalingv1alpha1.GetCondition(va, variantautoscalingv1alpha1.TypeMetricsAvailable)
+				optCond := variantautoscalingv1alpha1.GetCondition(va, variantautoscalingv1alpha1.TypeOptimizationReady)
+
 				GinkgoWriter.Printf("VA DesiredOptimizedAlloc.NumReplicas: %d (waiting for > 0)\n", optimized)
+				if metricsCond != nil {
+					GinkgoWriter.Printf("  MetricsAvailable: %s/%s (%s)\n", metricsCond.Status, metricsCond.Reason, metricsCond.Message)
+				}
+				if optCond != nil {
+					GinkgoWriter.Printf("  OptimizationReady: %s/%s (%s)\n", optCond.Status, optCond.Reason, optCond.Message)
+				}
 
 				// Scale-from-zero engine should detect pending requests and recommend scaling up
 				g.Expect(optimized).To(BeNumerically(">", 0),

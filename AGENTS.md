@@ -67,7 +67,7 @@ There are 3 main types of documentation targeting different audiences:
 
 ## E2E Testing
 
-- use make targets for running e2e tests (e.g., `make test-e2e`) and document the process in `docs/developer-guide/testing.md`
+- use make targets for running e2e tests (e.g., `make test-e2e-smoke` or `make test-e2e-full`) and document the process in `docs/developer-guide/testing.md`
 - use `make test` for unit tests
 - **Never use images from docker.io in e2e tests.** All container images must use fully-qualified registry paths (e.g., `registry.k8s.io/`, `quay.io/`, or a private registry). Do not rely on Docker Hub as a default registry.
 

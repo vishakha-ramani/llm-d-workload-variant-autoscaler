@@ -345,9 +345,15 @@ var _ = Describe("Parallel Load Scale-Up Test", Label("full"), Ordered, func() {
 	It("should detect increased load and trigger scale-up", func() {
 		By("Waiting for load generation to ramp up (30 seconds)")
 		time.Sleep(30 * time.Second)
+		GinkgoWriter.Println("Load ramp-up complete, monitoring VA for scale-up (up to 5m)")
 
 		By("Monitoring VariantAutoscaling for scale-up")
+		start := time.Now()
+		attempt := 0
 		Eventually(func(g Gomega) {
+			attempt++
+			elapsed := time.Since(start)
+
 			va := &variantautoscalingv1alpha1.VariantAutoscaling{}
 			err := crClient.Get(ctx, client.ObjectKey{
 				Namespace: cfg.LLMDNamespace,
@@ -357,8 +363,8 @@ var _ = Describe("Parallel Load Scale-Up Test", Label("full"), Ordered, func() {
 
 			scaledOptimized = int32(va.Status.DesiredOptimizedAlloc.NumReplicas)
 
-			GinkgoWriter.Printf("VA optimized replicas: %d (initial: %d, minReplicas: %d)\n",
-				scaledOptimized, initialOptimized, hpaMinReplicas)
+			GinkgoWriter.Printf("VA check #%d (%v elapsed): optimized=%d (initial=%d, minReplicas=%d)\n",
+				attempt, elapsed.Round(time.Second), scaledOptimized, initialOptimized, hpaMinReplicas)
 
 			if !lowLoad {
 				// Scale-up means we should have MORE replicas than our initial stabilized state

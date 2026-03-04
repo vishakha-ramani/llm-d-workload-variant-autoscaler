@@ -1,0 +1,42 @@
+# Only go.mod, go.sum, cmd/, api/, internal/, and pkg/ are needed by the Dockerfile.
+
+# Version control and IDE
+.git
+.gitignore
+.gitmodules
+.cursor
+.claude
+*.swp
+*.swo
+
+# Dependencies and tools (Go modules are copied explicitly; no need for full tree)
+vendor/
+
+# Submodules and sibling repos (not needed for building the manager binary)
+sample-data/
+llm-d-infra/
+# If building from a parent repo that includes llmd or GAIE, add:
+# llmd/
+# gateway-api-inference-extension/
+
+# Docs, tests, and deployment manifests (not used in the image)
+docs/
+test/
+deploy/
+hack/
+charts/
+config/
+
+# Build artifacts and local binaries
+bin/
+dist/
+*.exe
+*.test
+coverage.out
+coverage.html
+
+# Misc
+*.md
+.DS_Store
+.env
+.env.*

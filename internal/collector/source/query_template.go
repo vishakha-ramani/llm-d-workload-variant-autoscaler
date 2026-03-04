@@ -143,7 +143,14 @@ func (r *QueryList) List() []string {
 // --- Helpers ---
 
 // EscapePromQLValue escapes a value for safe use in PromQL label matchers.
-// Prevents injection by escaping backslashes and double quotes.
+// It escapes backslashes and double quotes to prevent injection when values
+// are substituted into query templates.
+//
+// Kubernetes naming (e.g. namespace) only allows DNS labels, so namespace
+// values cannot contain " or \. Other parameters are not restricted: e.g.
+// VariantAutoscaling.Spec.ModelID is user-controlled and has no pattern
+// validation, so escaping is required for modelID and any future
+// user- or config-driven parameters.
 func EscapePromQLValue(value string) string {
 	// Escape backslashes first (must be done before escaping quotes)
 	value = backslashPattern.ReplaceAllString(value, `\\`)

@@ -126,7 +126,7 @@ data:
 								Containers: []v1.Container{
 									{
 										Name:  "test-container",
-										Image: "quay.io/infernoautoscaler/vllme:0.2.1-multi-arch",
+										Image: "registry.k8s.io/pause:3.9",
 										Ports: []v1.ContainerPort{{ContainerPort: 80}},
 									},
 								},
@@ -362,7 +362,7 @@ data:
 								Containers: []v1.Container{
 									{
 										Name:  "test-container",
-										Image: "quay.io/infernoautoscaler/vllme:0.2.1-multi-arch",
+										Image: "registry.k8s.io/pause:3.9",
 										Ports: []v1.ContainerPort{{ContainerPort: 80}},
 									},
 								},

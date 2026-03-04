@@ -179,12 +179,6 @@ kubectl port-forward -n workload-variant-autoscaler-monitoring \
   svc/prometheus-operated 9090:9090
 ```
 
-**Port-forward vLLM emulator:**
-
-```bash
-kubectl port-forward -n llm-d-sim svc/vllme-service 8000:80
-```
-
 **Port-forward Inference Gateway:**
 
 ```bash
@@ -200,19 +194,32 @@ kubectl apply -f ../../config/samples/
 
 ### 3. Generate Load
 
+**Option A — Run E2E tests (recommended)**  
+The e2e suite deploys infra, creates resources, generates load, and validates scaling. No manual load tool needed.
+
 ```bash
-cd ../../tools/vllm-emulator
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Run load generator
-python loadgen.py \
-  --model default/default \
-  --rate '[[120, 60]]' \
-  --url http://localhost:8000/v1 \
-  --content 50
+# From repo root, after deploying (e.g. make deploy-wva-emulated-on-kind)
+make deploy-e2e-infra   # if not already done
+make test-e2e-smoke    # quick validation
+# or
+make test-e2e-full     # full suite including saturation scaling
 ```
+
+See [Testing Guide](../../docs/developer-guide/testing.md) and [E2E Test Suite README](../../test/e2e/README.md).
+
+**Option B — Manual load with burst script**  
+Use the script in the e2e fixtures (requires only `curl`; no Python). After port-forwarding the inference gateway or vLLM service to `localhost:8000`:
+
+```bash
+# From repo root
+export TARGET_URL="http://localhost:8000/v1/chat/completions"
+export MODEL_ID="unsloth/Meta-Llama-3.1-8B"
+export TOTAL_REQUESTS=100
+export BATCH_SIZE=10
+./hack/burst_load_generator.sh
+```
+
+Tune load with `TOTAL_REQUESTS`, `BATCH_SIZE`, and optional `BATCH_SLEEP`, `MAX_TOKENS`, `CURL_TIMEOUT` (see script header).
 
 ### 4. Monitor
 
@@ -286,7 +293,7 @@ KIND_IMAGE_PLATFORM=linux/arm64 make deploy-wva-emulated-on-kind CREATE_CLUSTER=
 Alternatively, build the image locally and deploy with `IfNotPresent` so the script skips the registry pull and loads your local single-platform image:
 
 ```bash
-make docker-build IMG=ghcr.io/llm-d/workload-variant-autoscaler:latest
+make docker-build IMG=ghcr.io/llm-d/llm-d-workload-variant-autoscaler:latest
 WVA_IMAGE_PULL_POLICY=IfNotPresent make deploy-wva-emulated-on-kind CREATE_CLUSTER=true DEPLOY_LLM_D=true
 ```
 

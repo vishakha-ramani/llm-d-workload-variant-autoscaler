@@ -246,7 +246,7 @@ Examples:
   $(basename "$0")
 
   # Deploy with custom WVA image
-  IMG=<your_registry>/workload-variant-autoscaler:tag $(basename "$0")
+  IMG=<your_registry>/llm-d-workload-variant-autoscaler:tag $(basename "$0")
 
   # Deploy with custom model and accelerator
   $(basename "$0") -m unsloth/Meta-Llama-3.1-8B -a A100

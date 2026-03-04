@@ -28,7 +28,7 @@ Using kustomize for more control:
 make install
 
 # Deploy the controller
-make deploy IMG=quay.io/llm-d/workload-variant-autoscaler:latest
+make deploy IMG=quay.io/llm-d/llm-d-workload-variant-autoscaler:latest
 ```
 
 ### Option 3: Local Development (Kind Emulator):
@@ -44,7 +44,7 @@ Key configuration options:
 ```yaml
 # custom-values.yaml
 image:
-  repository: quay.io/llm-d/workload-variant-autoscaler
+  repository: quay.io/llm-d/llm-d-workload-variant-autoscaler
   tag: latest
   pullPolicy: IfNotPresent
 

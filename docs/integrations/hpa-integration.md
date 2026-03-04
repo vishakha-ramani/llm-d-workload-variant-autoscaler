@@ -57,8 +57,8 @@ helm install prometheus-adapter prometheus-community/prometheus-adapter \
 ### 4. Create the VariantAutoscaling resource
 
 ```sh
-# Apply the VariantAutoscaling resource if not already there
-kubectl apply -f deploy/examples/vllm-emulator/vllme-setup/vllme-variantautoscaling.yaml
+# Apply the VariantAutoscaling resource if not already there (ensure target Deployment exists, e.g. from kind-emulator)
+kubectl apply -f config/samples/variantautoscaling-integration.yaml
 ```
 
 ### 5. Deploy the HPA resource
@@ -78,16 +78,16 @@ kubectl apply -f config/samples/hpa-integration.yaml
 
 ```sh
 kubectl get hpa -n llm-d-sim
-NAME                   REFERENCE                     TARGETS     MINPODS   MAXPODS   REPLICAS   AGE
-vllme-deployment-hpa   Deployment/vllme-deployment   1/1 (avg)   1         10        1          3m14s
+NAME                     REFERENCE                       TARGETS     MINPODS   MAXPODS   REPLICAS   AGE
+sample-deployment-hpa   Deployment/sample-deployment   1/1 (avg)   1         10        1          3m14s
 ```
 
 - Check the VariantAutoscaling resource:
 
 ```sh
 kubectl get variantautoscaling -n llm-d-sim
-NAME               MODEL             ACCELERATOR   CURRENTREPLICAS   OPTIMIZED   AGE
-vllme-deployment   default/default   A100          1                 1           39m
+NAME                 MODEL             ACCELERATOR   CURRENTREPLICAS   OPTIMIZED   AGE
+sample-deployment   default/default   A100          1                 1           39m
 ```
 
 - Check if the external metrics are available:
@@ -116,7 +116,7 @@ kubectl get --raw "/apis/external.metrics.k8s.io/v1beta1" | jq
 - Get the latest value for the `wva_desired_replicas` metric:
 
 ```sh
-kubectl get --raw "/apis/external.metrics.k8s.io/v1beta1/namespaces/llm-d-sim/wva_desired_replicas?labelSelector=variant_name%3Dvllme-deployment" | jq
+kubectl get --raw "/apis/external.metrics.k8s.io/v1beta1/namespaces/llm-d-sim/wva_desired_replicas?labelSelector=variant_name%3Dsample-deployment" | jq
 {
   "kind": "ExternalMetricValueList",
   "apiVersion": "external.metrics.k8s.io/v1beta1",
@@ -134,7 +134,7 @@ kubectl get --raw "/apis/external.metrics.k8s.io/v1beta1/namespaces/llm-d-sim/wv
         "namespace": "workload-variant-autoscaler-system",
         "pod": "workload-variant-autoscaler-controller-manager-99c9d77cb-ppjm8",
         "service": "workload-variant-autoscaler-controller-manager-metrics-service",
-        "variant_name": "vllme-deployment"
+        "variant_name": "sample-deployment"
       },
       "timestamp": "2025-08-22T19:08:26Z",
       "value": "1"
@@ -151,16 +151,17 @@ kubectl get --raw "/apis/external.metrics.k8s.io/v1beta1/namespaces/llm-d-sim/wv
 # If you deployed workload-variant-autoscaler with llm-d:
 kubectl port-forward -n llm-d-sim svc/infra-sim-inference-gateway 8000:80 
 
-# If you deployed workload-variant-autoscaler without llm-d:
-kubectl port-forward -n llm-d-sim svc/vllme-service 8000:80
+# If you deployed workload-variant-autoscaler without llm-d, port-forward your model service (e.g. the Deployment's Service) on 8000:80.
 ```
 
-2. Launch the load generator via the following command:
+2. Launch the load generator (burst script; requires only `curl`). From repo root, with the vLLM service port-forwarded to localhost:8000:
 
 ```sh
-cd tools/vllm-emulator
-pip install -r requirements.txt
-python loadgen.py --model default/default  --rate '[[1200, 40]]' --url http://localhost:8000/v1 --content 50
+export TARGET_URL="http://localhost:8000/v1/chat/completions"
+export MODEL_ID="unsloth/Meta-Llama-3.1-8B"
+export TOTAL_REQUESTS=200
+export BATCH_SIZE=20
+./hack/burst_load_generator.sh
 ```
 
 3. After a few minutes, you can see the scale out:
@@ -168,15 +169,15 @@ python loadgen.py --model default/default  --rate '[[1200, 40]]' --url http://lo
 ```sh
 kubectl get hpa -n llm-d-sim
 NAME                   REFERENCE                     TARGETS     MINPODS   MAXPODS   REPLICAS   AGE
-vllme-deployment-hpa   Deployment/vllme-deployment   1/1 (avg)   1         10        2          20m
+sample-deployment-hpa   Deployment/sample-deployment   1/1 (avg)   1         10        2          20m
 
 kubectl get variantautoscaling -n llm-d-sim
 NAME               MODEL             ACCELERATOR   CURRENTREPLICAS   OPTIMIZED   AGE
-vllme-deployment   default/default   A100          1                 2           20m
+sample-deployment   default/default   A100          1                 2           20m
 
 kubectl get deployments.apps -n llm-d-sim
 NAME               READY   UP-TO-DATE   AVAILABLE   AGE
-vllme-deployment   2/2     2            2           21m
+sample-deployment   2/2     2            2           21m
 ```
 
 It can be verified that the workload-variant-autoscaler is optimizing and emitting metrics:
@@ -189,16 +190,16 @@ kubectl logs -n workload-variant-autoscaler-system deploy/workload-variant-autos
 2025-08-22T18:47:50.131912017Z {"level":"DEBUG","ts":"2025-08-22T18:47:50.131Z","msg":"System data prepared for optimization: - { serviceClasses: [  {   name: Premium,   model: default/default,   priority: 1,   slo-itl: 24,   slo-ttw: 500,   slo-tps: 0  },  {   name: Premium,   model: llama0-70b,   priority: 1,   slo-itl: 80,   slo-ttw: 500,   slo-tps: 0  },  {   name: Freemium,   model: granite-13b,   priority: 10,   slo-itl: 200,   slo-ttw: 2000,   slo-tps: 0  },  {   name: Freemium,   model: llama0-7b,   priority: 10,   slo-itl: 150,   slo-ttw: 1500,   slo-tps: 0  } ]}"}
 2025-08-22T18:47:50.131943892Z {"level":"DEBUG","ts":"2025-08-22T18:47:50.131Z","msg":"System data prepared for optimization: - { models: [  {   name: default/default,   acc: A100,   accCount: 1,   alpha: 20.58,   beta: 0.41,   maxBatchSize: 4,   atTokens: 0  } ]}"}
 2025-08-22T18:47:50.131989100Z {"level":"DEBUG","ts":"2025-08-22T18:47:50.131Z","msg":"System data prepared for optimization: - { optimizer: {  unlimited: true,  saturationPolicy: None }}"}
-2025-08-22T18:47:50.132035975Z {"level":"DEBUG","ts":"2025-08-22T18:47:50.132Z","msg":"System data prepared for optimization: - { servers: [  {   name: vllme-deployment:llm-d-sim,   class: Premium,   model: default/default,   keepAccelerator: true,   minNumReplicas: 1,   maxBatchSize: 4,   currentAlloc: {    accelerator: A100,    numReplicas: 2,    maxBatch: 256,    cost: 80,    itlAverage: 20,    waitAverage: 0,    load: {     arrivalRate: 40,     avgLength: 178,     arrivalCOV: 0,     serviceCOV: 0    }   },   desiredAlloc: {    accelerator: ,    numReplicas: 0,    maxBatch: 0,    cost: 0,    itlAverage: 0,    waitAverage: 0,    load: {     arrivalRate: 0,     avgLength: 0,     arrivalCOV: 0,     serviceCOV: 0    }   }  } ]}"}
-2025-08-22T18:47:50.132082392Z {"level":"DEBUG","ts":"2025-08-22T18:47:50.132Z","msg":"Optimization solution - system: Solution: \ns=vllme-deployment:llm-d-sim; c=Premium; m=default/default; rate=40; tk=178; sol=1, sat=false, alloc={acc=A100; num=2; maxBatch=4; cost=80, val=0, servTime=21.49347, waitTime=69.7666, rho=0.71789724, maxRPM=25.31145}; slo-itl=24, slo-ttw=500, slo-tps=0 \nAllocationByType: \nname=NVIDIA-A100-PCIE-80GB, count=2, limit=2, cost=80 \ntotalCost=80 \n"}
+2025-08-22T18:47:50.132035975Z {"level":"DEBUG","ts":"2025-08-22T18:47:50.132Z","msg":"System data prepared for optimization: - { servers: [  {   name: sample-deployment:llm-d-sim,   class: Premium,   model: default/default,   keepAccelerator: true,   minNumReplicas: 1,   maxBatchSize: 4,   currentAlloc: {    accelerator: A100,    numReplicas: 2,    maxBatch: 256,    cost: 80,    itlAverage: 20,    waitAverage: 0,    load: {     arrivalRate: 40,     avgLength: 178,     arrivalCOV: 0,     serviceCOV: 0    }   },   desiredAlloc: {    accelerator: ,    numReplicas: 0,    maxBatch: 0,    cost: 0,    itlAverage: 0,    waitAverage: 0,    load: {     arrivalRate: 0,     avgLength: 0,     arrivalCOV: 0,     serviceCOV: 0    }   }  } ]}"}
+2025-08-22T18:47:50.132082392Z {"level":"DEBUG","ts":"2025-08-22T18:47:50.132Z","msg":"Optimization solution - system: Solution: \ns=sample-deployment:llm-d-sim; c=Premium; m=default/default; rate=40; tk=178; sol=1, sat=false, alloc={acc=A100; num=2; maxBatch=4; cost=80, val=0, servTime=21.49347, waitTime=69.7666, rho=0.71789724, maxRPM=25.31145}; slo-itl=24, slo-ttw=500, slo-tps=0 \nAllocationByType: \nname=NVIDIA-A100-PCIE-80GB, count=2, limit=2, cost=80 \ntotalCost=80 \n"}
 2025-08-22T18:47:50.132135142Z {"level":"DEBUG","ts":"2025-08-22T18:47:50.132Z","msg":"Optimization completed successfully, emitting optimization metrics"}
 2025-08-22T18:47:50.132148142Z {"level":"DEBUG","ts":"2025-08-22T18:47:50.132Z","msg":"Optimized allocation map - numKeys: 1, updateList_count: 1"}
-2025-08-22T18:47:50.132165642Z {"level":"DEBUG","ts":"2025-08-22T18:47:50.132Z","msg":"Optimized allocation entry - key: vllme-deployment, value: {2025-08-22 18:47:50.1321171 +0000 UTC m=+1620.775291857 A100 2}"}
+2025-08-22T18:47:50.132165642Z {"level":"DEBUG","ts":"2025-08-22T18:47:50.132Z","msg":"Optimized allocation entry - key: sample-deployment, value: {2025-08-22 18:47:50.1321171 +0000 UTC m=+1620.775291857 A100 2}"}
 2025-08-22T18:47:50.132178183Z {"level":"DEBUG","ts":"2025-08-22T18:47:50.132Z","msg":"Optimization metrics emitted, starting to process variants - variant_count: 1"}
-2025-08-22T18:47:50.132288225Z {"level":"DEBUG","ts":"2025-08-22T18:47:50.132Z","msg":"Processing variant - index: 0, variantAutoscaling-name: vllme-deployment, namespace: llm-d-sim, has_optimized_alloc: true"}
-2025-08-22T18:47:50.132290017Z {"level":"DEBUG","ts":"2025-08-22T18:47:50.132Z","msg":"EmitReplicaMetrics completed successfullyvariantvllme-deployment"}
-2025-08-22T18:47:50.132291350Z {"level":"INFO","ts":"2025-08-22T18:47:50.132Z","msg":"Emitted optimization signals for external autoscaler consumptionvariantvllme-deploymentnamespacellm-d-sim"}
-2025-08-22T18:47:50.132292725Z {"level":"DEBUG","ts":"2025-08-22T18:47:50.132Z","msg":"Successfully emitted optimization signals for external autoscalersvariantvllme-deployment"}
+2025-08-22T18:47:50.132288225Z {"level":"DEBUG","ts":"2025-08-22T18:47:50.132Z","msg":"Processing variant - index: 0, variantAutoscaling-name: sample-deployment, namespace: llm-d-sim, has_optimized_alloc: true"}
+2025-08-22T18:47:50.132290017Z {"level":"DEBUG","ts":"2025-08-22T18:47:50.132Z","msg":"EmitReplicaMetrics completed successfullyvariant sample-deployment"}
+2025-08-22T18:47:50.132291350Z {"level":"INFO","ts":"2025-08-22T18:47:50.132Z","msg":"Emitted optimization signals for external autoscaler consumptionvariant sample-deploymentnamespacellm-d-sim"}
+2025-08-22T18:47:50.132292725Z {"level":"DEBUG","ts":"2025-08-22T18:47:50.132Z","msg":"Successfully emitted optimization signals for external autoscalersvariant sample-deployment"}
 2025-08-22T18:47:50.141451683Z {"level":"DEBUG","ts":"2025-08-22T18:47:50.141Z","msg":"Completed variant processing loop"}
 2025-08-22T18:47:50.141458767Z {"level":"INFO","ts":"2025-08-22T18:47:50.141Z","msg":"Reconciliation completed - variants_processed: 1, optimization_successful: true"}
 ```
@@ -492,13 +493,13 @@ extraArguments:
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
-  name: vllme-deployment-hpa
+  name: sample-deployment-hpa
   namespace: llm-d-sim
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
-    name: vllme-deployment
+    name: sample-deployment
   minReplicas: 0  # HPAScaleToZero - alpha feature
   maxReplicas: 10
   behavior:
@@ -521,7 +522,7 @@ spec:
         name: wva_desired_replicas
         selector:
           matchLabels:
-            variant_name: vllme-deployment
+            variant_name: sample-deployment
       target:
         type: AverageValue
         averageValue: "1"

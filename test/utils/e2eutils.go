@@ -123,7 +123,7 @@ func InstallPrometheusOperator() error {
 	// Install Prometheus with TLS configuration
 	cmd = exec.Command("helm", "upgrade", "-i", "kube-prometheus-stack", "prometheus-community/kube-prometheus-stack",
 		"-n", monitoringNamespace,
-		"-f", "deploy/examples/vllm-emulator/prometheus-operator/prometheus-tls-values.yaml")
+		"-f", "deploy/prometheus-operator/prometheus-tls-values.yaml")
 	if _, err := Run(cmd); err != nil {
 		return err
 	}
@@ -398,8 +398,8 @@ func GetProjectDir() (string, error) {
 		return wd, err
 	}
 
-	// Handle both test packages
-	m := regexp.MustCompile(`/test/(e2e-saturation-based|e2e)`)
+	// Handle test package path (consolidated e2e suite)
+	m := regexp.MustCompile(`/test/e2e`)
 	wd = m.ReplaceAllString(wd, "")
 	return wd, nil
 }

@@ -100,7 +100,7 @@ var _ = Describe("Actuator", func() {
 							Containers: []corev1.Container{
 								{
 									Name:  "test-container",
-									Image: "quay.io/infernoautoscaler/vllme:0.2.3-multi-arch",
+									Image: "registry.k8s.io/pause:3.9",
 									Ports: []corev1.ContainerPort{{ContainerPort: 80}},
 								},
 							},
@@ -188,7 +188,7 @@ var _ = Describe("Actuator", func() {
 							Containers: []corev1.Container{
 								{
 									Name:  "test-container",
-									Image: "quay.io/infernoautoscaler/vllme:0.2.3-multi-arch",
+									Image: "registry.k8s.io/pause:3.9",
 									Ports: []corev1.ContainerPort{{ContainerPort: 80}},
 								},
 							},
@@ -309,7 +309,7 @@ var _ = Describe("Actuator", func() {
 							Containers: []corev1.Container{
 								{
 									Name:  "test-container",
-									Image: "quay.io/infernoautoscaler/vllme:0.2.3-multi-arch",
+									Image: "registry.k8s.io/pause:3.9",
 									Ports: []corev1.ContainerPort{{ContainerPort: 80}},
 								},
 							},
@@ -438,7 +438,7 @@ var _ = Describe("Actuator", func() {
 							Containers: []corev1.Container{
 								{
 									Name:  "test-container",
-									Image: "quay.io/infernoautoscaler/vllme:0.2.3-multi-arch",
+									Image: "registry.k8s.io/pause:3.9",
 									Ports: []corev1.ContainerPort{{ContainerPort: 80}},
 								},
 							},

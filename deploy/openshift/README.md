@@ -358,7 +358,8 @@ kubectl logs -n workload-variant-autoscaler-system \
 ### Run E2E Tests on OpenShift
 
 ```bash
-make test-e2e-openshift
+export ENVIRONMENT=openshift
+make test-e2e-full
 ```
 
 ### Generate Load

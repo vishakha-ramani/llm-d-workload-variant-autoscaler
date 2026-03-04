@@ -27,6 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	variantautoscalingv1alpha1 "github.com/llm-d/llm-d-workload-variant-autoscaler/api/v1alpha1"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/test/utils"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -143,6 +144,21 @@ var _ = BeforeSuite(func() {
 	}
 
 	GinkgoWriter.Println("BeforeSuite completed successfully - infrastructure ready")
+})
+
+// ReportAfterEach dumps controller logs and VA status after a failed test.
+// This makes E2E failures self-contained and easier to debug (why scaling happened / didn't happen).
+var _ = ReportAfterEach(func(report SpecReport) {
+	if !report.Failed() {
+		return
+	}
+	if k8sClient == nil || crClient == nil {
+		return
+	}
+
+	GinkgoWriter.Printf("\n=== Failure diagnostics: %s ===\n", report.FullText())
+	utils.DumpControllerLogs(context.Background(), k8sClient, cfg.WVANamespace, GinkgoWriter)
+	utils.DumpVAStatus(context.Background(), crClient, GinkgoWriter)
 })
 
 var _ = AfterSuite(func() {

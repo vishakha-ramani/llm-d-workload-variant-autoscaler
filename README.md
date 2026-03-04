@@ -5,6 +5,11 @@
 
 
 The Workload Variant Autoscaler (WVA) is a Kubernetes-based global autoscaler for inference model servers serving LLMs. WVA works alongside standard Kubernetes HPA autoscaler and external autoscalers like KEDA to scale the object supporting scale subresource. The high-level details of the algorithm are [here](https://github.com/llm-d/llm-d-workload-variant-autoscaler/blob/main/docs/saturation-scaling-config.md ). It determines optimal replica counts for given request traffic loads for inference servers by considering constraints such as GPU count (cluster resources), energy-budget and performance-budget (latency/throughput).
+
+### What is a variant?
+
+In WVA, a **variant** is a way of serving a given model: a scale target (Deployment, StatefulSet, or LWS) with a particular combination of hardware, runtimes, and serving approach. Variants for the same model share the same base model (e.g. meta/llama-3.1-8b); LoRA adapters can differ per variant. Each variant is a distinct setup—e.g. different accelerators (A100, H100, L4), parallelism, or performance requirements. Create one `VariantAutoscaling` per variant; when several variants serve the same model, WVA chooses which to scale (e.g. add capacity on the cheapest variant, remove it from the most expensive). See [Configuration](docs/user-guide/configuration.md) and [Saturation Analyzer](docs/saturation-analyzer.md) for details.
+
 <!--
 <![Architecture](docs/design/diagrams/inferno-WVA-design.png)>
 -->

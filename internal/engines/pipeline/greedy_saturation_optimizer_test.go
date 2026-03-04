@@ -553,7 +553,7 @@ var _ = Describe("GreedyBySaturationOptimizer", func() {
 			// demand exceeds total supply including pending.
 			// cheap-pending is more cost-efficient (5/10000=0.0005 vs 15/20000=0.00075)
 			// → it gets the allocation.
-			Expect(dm["cheap-pending"].TargetReplicas).To(Equal(3))    // +1
+			Expect(dm["cheap-pending"].TargetReplicas).To(Equal(3))   // +1
 			Expect(dm["expensive-ready"].TargetReplicas).To(Equal(1)) // unchanged
 		})
 	})
@@ -729,7 +729,7 @@ var _ = Describe("GreedyBySaturationOptimizer", func() {
 				{remaining: 100},
 				{remaining: -1}, // removed
 				{remaining: 50},
-				{remaining: 0},  // satisfied
+				{remaining: 0}, // satisfied
 			}
 
 			active := filterActive(work)

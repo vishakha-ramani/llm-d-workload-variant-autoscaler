@@ -183,7 +183,7 @@ make deploy-wva-on-k8s
 
 ```bash
 export HF_TOKEN="hf_xxxxx"
-export IMG="ghcr.io/yourorg/workload-variant-autoscaler:latest"
+export IMG="ghcr.io/yourorg/llm-d-workload-variant-autoscaler:latest"
 make deploy-wva-on-k8s
 ```
 
@@ -657,7 +657,7 @@ kubectl set env deployment/workload-variant-autoscaler-controller-manager \
 ### Update WVA Image
 
 ```bash
-export WVA_IMAGE="ghcr.io/yourorg/workload-variant-autoscaler:custom-tag"
+export WVA_IMAGE="ghcr.io/yourorg/llm-d-workload-variant-autoscaler:custom-tag"
 export DEPLOY_LLM_D=false  # Don't redeploy llm-d
 export DEPLOY_PROMETHEUS=false  # Don't redeploy Prometheus
 make deploy-wva-on-k8s

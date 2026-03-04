@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/config"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/constants"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -23,6 +24,9 @@ func (r *ConfigMapReconciler) BootstrapInitialConfigMaps(ctx context.Context) er
 	}
 
 	systemNamespace := config.SystemNamespace()
+	watchNamespace := r.Config.WatchNamespace()
+
+	// Always bootstrap global ConfigMaps from system namespace
 	targets := []struct {
 		name      string
 		namespace string
@@ -32,21 +36,64 @@ func (r *ConfigMapReconciler) BootstrapInitialConfigMaps(ctx context.Context) er
 		{name: config.DefaultScaleToZeroConfigMapName, namespace: systemNamespace, isGlobal: true},
 	}
 
-	if watchNamespace := r.Config.WatchNamespace(); watchNamespace != "" && watchNamespace != systemNamespace {
+	// Determine which namespaces to scan for namespace-local ConfigMaps
+	var namespacesToScan []string
+
+	if watchNamespace != "" {
+		// Single-namespace mode: only watch the specified namespace
+		if watchNamespace != systemNamespace {
+			namespacesToScan = []string{watchNamespace}
+			logger.Info("Initial ConfigMap bootstrap", "watchNamespace", watchNamespace)
+		}
+	} else {
+		// All-namespaces mode: list and scan all namespaces
+		namespaceList := &corev1.NamespaceList{}
+		if err := r.List(ctx, namespaceList, &client.ListOptions{}); err != nil {
+			logger.Error(err, "Failed to list namespaces during bootstrap")
+			r.Config.MarkConfigMapsBootstrapFailed(err)
+			return fmt.Errorf("failed to list namespaces: %w", err)
+		}
+
+		for _, ns := range namespaceList.Items {
+			// Skip system namespace to avoid duplicate global config loading
+			if ns.Name != systemNamespace {
+				if ns.Annotations != nil {
+					if value, ok := ns.Annotations[constants.NamespaceExcludeAnnotationKey]; ok {
+						if value == "true" {
+							continue // Skip excluded namespaces. Only for all-namespaces mode.
+						}
+					}
+					
+				}
+				if ns.Labels != nil {
+					if value, ok := ns.Labels[constants.NamespaceConfigEnabledLabelKey]; ok {
+						if value == "true" {
+							namespacesToScan = append(namespacesToScan, ns.Name)
+						}
+					}
+				}
+			}
+		}
+		logger.Info("Initial ConfigMap bootstrap", "namespaceCount", len(namespacesToScan))
+	}
+
+	// Add namespace-local ConfigMap targets
+	for _, ns := range namespacesToScan {
 		targets = append(targets,
 			struct {
 				name      string
 				namespace string
 				isGlobal  bool
-			}{name: config.SaturationConfigMapName(), namespace: watchNamespace, isGlobal: false},
+			}{name: config.SaturationConfigMapName(), namespace: ns, isGlobal: false},
 			struct {
 				name      string
 				namespace string
 				isGlobal  bool
-			}{name: config.DefaultScaleToZeroConfigMapName, namespace: watchNamespace, isGlobal: false},
+			}{name: config.DefaultScaleToZeroConfigMapName, namespace: ns, isGlobal: false},
 		)
 	}
 
+	// Bootstrap all target ConfigMaps
 	for _, target := range targets {
 		if err := r.bootstrapConfigMap(ctx, target.name, target.namespace, target.isGlobal); err != nil {
 			r.Config.MarkConfigMapsBootstrapFailed(err)

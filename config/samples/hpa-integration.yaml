@@ -1,13 +1,13 @@
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
-  name: vllme-deployment-hpa
+  name: sample-deployment-hpa
   namespace: llm-d-sim
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
-    name: vllme-deployment
+    name: sample-deployment
   # minReplicas: 0  # scale to zero - alpha feature
   maxReplicas: 10
   behavior:
@@ -30,7 +30,7 @@ spec:
         name: wva_desired_replicas
         selector:
           matchLabels:
-            variant_name: vllme-deployment-va
+            variant_name: sample-deployment
       target:
         type: AverageValue
         averageValue: "1"

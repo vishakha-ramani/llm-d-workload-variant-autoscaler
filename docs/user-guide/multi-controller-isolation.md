@@ -20,10 +20,10 @@ Run multiple independent test suites simultaneously without metric conflicts:
 
 ```bash
 # Test suite A with controller instance "test-a"
-CONTROLLER_INSTANCE=test-a make test-e2e
+CONTROLLER_INSTANCE=test-a make test-e2e-full
 
 # Test suite B with controller instance "test-b" (runs in parallel)
-CONTROLLER_INSTANCE=test-b make test-e2e
+CONTROLLER_INSTANCE=test-b make test-e2e-full
 ```
 
 Each test suite:

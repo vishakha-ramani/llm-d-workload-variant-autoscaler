@@ -41,11 +41,10 @@ helm install keda kedacore/keda \
   --set prometheus.operator.enabled=true
 ```
 
-2. Apply the sample KEDA ScaledObject configuration. A basic `yaml` example snippet for the ScaledObject targeting the vLLM-emulator deployment can be found [at the end of this doc](#keda-scaleobject-configuration-example-configsampleskeda-scaled-object-vllmeyaml).
+2. Apply the sample KEDA ScaledObject configuration. A full example is in `config/samples/keda-scaled-object.yaml` and [at the end of this doc](#keda-scaledobject-configuration-example-configsampleskeda-scaled-objectyaml).
 
 ```bash
-# After creating config/samples/scaledobject-vllme.yaml
-kubectl apply -f config/samples/scaledobject-vllme.yaml
+kubectl apply -f config/samples/keda-scaled-object.yaml
 ```
 
 3. Verify the installation:
@@ -56,7 +55,7 @@ kubectl get scaledobjects -n llm-d-sim
 
 kubectl get scaledobjects.keda.sh -n llm-d-sim                              
 NAME                      SCALETARGETKIND      SCALETARGETNAME    MIN   MAX   READY   ACTIVE   FALLBACK   PAUSED    TRIGGERS     AUTHENTICATIONS   AGE
-vllme-deployment-scaler   apps/v1.Deployment   vllme-deployment         10    True    False    False      Unknown   prometheus                     33m
+sample-deployment-scaler   apps/v1.Deployment   sample-deployment         10    True    False    False      Unknown   prometheus                     33m
 ```
 
 ```bash
@@ -72,8 +71,8 @@ kubectl get events -n llm-d-sim --field-selector type=Normal
 4. Apply the VariantAutoscaling resource for the Deployment, so that the workload-variant-autoscaler starts emitting metrics:
 
 ```bash
-# For the default vllme-deployment
-kubectl apply -f deploy/examples/vllm-emulator/vllme-setup/vllme-variantautoscaling.yaml
+# Ensure the target Deployment exists (e.g. from kind-emulator), then apply the VariantAutoscaling:
+kubectl apply -f config/samples/variantautoscaling-integration.yaml
 ```
 
 5. Verify the HorizontalPodAutoscaler deployed by the ScaledObject and used by KEDA. After a while, you should see that it is correcly receiving metrics:
@@ -82,7 +81,7 @@ kubectl apply -f deploy/examples/vllm-emulator/vllme-setup/vllme-variantautoscal
 kubectl get hpa -n llm-d-sim
 
 NAME                            REFERENCE                     TARGETS     MINPODS   MAXPODS   REPLICAS   AGE
-wva-keda-hpa-vllme-deployment   Deployment/vllme-deployment   1/1 (avg)   1         10        1          40s
+wva-keda-hpa-sample-deployment   Deployment/sample-deployment   1/1 (avg)   1         10        1          40s
 ```
 
 6. Verify that metrics are being emitted:
@@ -110,7 +109,7 @@ kubectl get --raw "/apis/external.metrics.k8s.io/v1beta1" | jq
 
 ```bash
 # Check specific metric for the vLLM-e ScaledObject
-kubectl get --raw "/apis/external.metrics.k8s.io/v1beta1/namespaces/llm-d-sim/s0-prometheus?labelSelector=scaledobject.keda.sh%2Fname%3Dvllme-deployment-scaler" | jq
+kubectl get --raw "/apis/external.metrics.k8s.io/v1beta1/namespaces/llm-d-sim/s0-prometheus?labelSelector=scaledobject.keda.sh%2Fname%3Dsample-deployment-scaler" | jq
 
 {
   "kind": "ExternalMetricValueList",
@@ -144,17 +143,17 @@ To query KEDA external metrics, you must use:
 kubectl get events -n llm-d-sim --field-selector type=Normal -w
 
 ### ...
-37m         Normal   KEDAScalersStarted           scaledobject/vllme-deployment-scaler                      Scaler prometheus is built
-37m         Normal   KEDAScalersStarted           scaledobject/vllme-deployment-scaler                      Started scalers watch
-37m         Normal   ScaledObjectReady            scaledobject/vllme-deployment-scaler                      ScaledObject is ready for scaling
-36m         Normal   KEDAScaleTargetDeactivated   scaledobject/vllme-deployment-scaler                      Deactivated apps/v1.Deployment llm-d-sim/vllme-deployment from 1 to 0
-3m37s       Normal   KEDAScaleTargetActivated     scaledobject/vllme-deployment-scaler                      Scaled apps/v1.Deployment llm-d-sim/vllme-deployment from 0 to 1, triggered by wva-desired-replicas
-3m37s       Normal   ScalingReplicaSet            deployment/vllme-deployment                               Scaled up replica set vllme-deployment-64f7cd79f5 from 0 to 1
+37m         Normal   KEDAScalersStarted           scaledobject/sample-deployment-scaler                      Scaler prometheus is built
+37m         Normal   KEDAScalersStarted           scaledobject/sample-deployment-scaler                      Started scalers watch
+37m         Normal   ScaledObjectReady            scaledobject/sample-deployment-scaler                      ScaledObject is ready for scaling
+36m         Normal   KEDAScaleTargetDeactivated   scaledobject/sample-deployment-scaler                      Deactivated apps/v1.Deployment llm-d-sim/sample-deployment from 1 to 0
+3m37s       Normal   KEDAScaleTargetActivated     scaledobject/sample-deployment-scaler                      Scaled apps/v1.Deployment llm-d-sim/sample-deployment from 0 to 1, triggered by wva-desired-replicas
+3m37s       Normal   ScalingReplicaSet            deployment/sample-deployment                               Scaled up replica set sample-deployment-64f7cd79f5 from 0 to 1
 ```
 
 ```bash
 # Monitor deployment scaling events specifically  
-kubectl get events -n llm-d-sim --field-selector involvedObject.name=vllme-deployment
+kubectl get events -n llm-d-sim --field-selector involvedObject.name=sample-deployment
 ```
 
 ```bash
@@ -162,10 +161,10 @@ kubectl get events -n llm-d-sim --field-selector involvedObject.name=vllme-deplo
 kubectl get events -n llm-d-sim | grep -i keda
 
 # ...
-38m         Normal    KEDAScalersStarted           scaledobject/vllme-deployment-scaler                      Scaler prometheus is built
-38m         Normal    KEDAScalersStarted           scaledobject/vllme-deployment-scaler                      Started scalers watch
-38m         Normal    KEDAScaleTargetDeactivated   scaledobject/vllme-deployment-scaler                      Deactivated apps/v1.Deployment llm-d-sim/vllme-deployment from 1 to 0
-4m55s       Normal    KEDAScaleTargetActivated     scaledobject/vllme-deployment-scaler                      Scaled apps/v1.Deployment llm-d-sim/vllme-deployment from 0 to 1, triggered by wva-desired-replicas
+38m         Normal    KEDAScalersStarted           scaledobject/sample-deployment-scaler                      Scaler prometheus is built
+38m         Normal    KEDAScalersStarted           scaledobject/sample-deployment-scaler                      Started scalers watch
+38m         Normal    KEDAScaleTargetDeactivated   scaledobject/sample-deployment-scaler                      Deactivated apps/v1.Deployment llm-d-sim/sample-deployment from 1 to 0
+4m55s       Normal    KEDAScaleTargetActivated     scaledobject/sample-deployment-scaler                      Scaled apps/v1.Deployment llm-d-sim/sample-deployment from 0 to 1, triggered by wva-desired-replicas
 ```
 
 ## Example: scale-up scenario
@@ -177,12 +176,14 @@ kubectl get events -n llm-d-sim | grep -i keda
 kubectl port-forward -n llm-d-sim svc/infra-sim-inference-gateway 8000:80 
 ```
 
-2. Launch the load generator via the following command:
+2. Launch the load generator (burst script; requires only `curl`). From repo root, with the vLLM service port-forwarded to localhost:8000:
 
 ```sh
-cd tools/vllm-emulator
-pip install -r requirements.txt
-python loadgen.py --model default/default  --rate '[[1200, 40]]' --url http://localhost:8000/v1 --content 50
+export TARGET_URL="http://localhost:8000/v1/chat/completions"
+export MODEL_ID="unsloth/Meta-Llama-3.1-8B"
+export TOTAL_REQUESTS=200
+export BATCH_SIZE=20
+./hack/burst_load_generator.sh
 ```
 
 3. After a few minutes, you can see the scale out:
@@ -191,17 +192,17 @@ python loadgen.py --model default/default  --rate '[[1200, 40]]' --url http://lo
 kubectl get hpa -n llm-d-sim
 
 NAME                            REFERENCE                     TARGETS     MINPODS   MAXPODS   REPLICAS   AGE
-wva-keda-hpa-vllme-deployment   Deployment/vllme-deployment   1/1 (avg)   1         10        1          114s
-wva-keda-hpa-vllme-deployment   Deployment/vllme-deployment   2/1 (avg)   1         10        1          6m1s
-wva-keda-hpa-vllme-deployment   Deployment/vllme-deployment   1/1 (avg)   1         10        2          6m16s
+wva-keda-hpa-sample-deployment   Deployment/sample-deployment   1/1 (avg)   1         10        1          114s
+wva-keda-hpa-sample-deployment   Deployment/sample-deployment   2/1 (avg)   1         10        1          6m1s
+wva-keda-hpa-sample-deployment   Deployment/sample-deployment   1/1 (avg)   1         10        2          6m16s
 
 kubectl get va -n llm-d-sim 
 NAME               MODEL             ACCELERATOR   CURRENTREPLICAS   OPTIMIZED   AGE
-vllme-deployment   default/default   A100          1                 2           11m
+sample-deployment   default/default   A100          1                 2           11m
 
 kubectl get deployments.apps -n llm-d-sim
 NAME               READY   UP-TO-DATE   AVAILABLE   AGE
-vllme-deployment   2/2     2            2           12m
+sample-deployment   2/2     2            2           12m
 ```
 
 It can be verified that the workload-variant-autoscaler is optimizing and emitting metrics:
@@ -219,36 +220,36 @@ kubectl logs -n workload-variant-autoscaler-system deploy/workload-variant-autos
 2025-09-12T17:03:42.155729968Z {"level":"DEBUG","ts":"2025-09-12T17:03:42.155Z","msg":"System data prepared for optimization: - { serviceClasses: [  {   name: Premium,   priority: 1,   modelTargets: [    {     model: default/default,     slo-itl: 24,     slo-ttw: 500,     slo-tps: 0    },    {     model: meta/llama0-70b,     slo-itl: 80,     slo-ttw: 500,     slo-tps: 0    }   ]  },  {   name: Freemium,   priority: 10,   modelTargets: [    {     model: ibm/granite-13b,     slo-itl: 200,     slo-ttw: 2000,     slo-tps: 0    },    {     model: meta/llama0-7b,     slo-itl: 150,     slo-ttw: 1500,     slo-tps: 0    }   ]  } ]}"}
 2025-09-12T17:03:42.159912718Z {"level":"DEBUG","ts":"2025-09-12T17:03:42.155Z","msg":"System data prepared for optimization: - { models: [  {   name: default/default,   acc: A100,   accCount: 1,   alpha: 20.58,   beta: 0.41,   maxBatchSize: 4,   atTokens: 0  } ]}"}
 2025-09-12T17:03:42.159921135Z {"level":"DEBUG","ts":"2025-09-12T17:03:42.155Z","msg":"System data prepared for optimization: - { optimizer: {  unlimited: true,  delayedBestEffort: false,  saturationPolicy: None }}"}
-2025-09-12T17:03:42.159924135Z {"level":"DEBUG","ts":"2025-09-12T17:03:42.155Z","msg":"System data prepared for optimization: - { servers: [  {   name: vllme-deployment:llm-d-sim,   class: Premium,   model: default/default,   keepAccelerator: true,   minNumReplicas: 1,   maxBatchSize: 4,   currentAlloc: {    accelerator: A100,    numReplicas: 2,    maxBatch: 256,    cost: 80,    itlAverage: 20,    waitAverage: 0,    load: {     arrivalRate: 41.32,     avgLength: 178,     arrivalCOV: 0,     serviceCOV: 0    }   },   desiredAlloc: {    accelerator: ,    numReplicas: 0,    maxBatch: 0,    cost: 0,    itlAverage: 0,    waitAverage: 0,    load: {     arrivalRate: 0,     avgLength: 0,     arrivalCOV: 0,     serviceCOV: 0    }   }  } ]}"}
-2025-09-12T17:03:42.159926301Z {"level":"DEBUG","ts":"2025-09-12T17:03:42.155Z","msg":"Optimization solution - system: Solution: \ns=vllme-deployment:llm-d-sim; c=Premium; m=default/default; rate=41.32; tk=178; sol=1, sat=false, alloc={acc=A100; num=2; maxBatch=4; cost=80, val=0, servTime=21.509005, waitTime=78.63574, rho=0.72974753, maxRPM=25.31145}; slo-itl=24, slo-ttw=500, slo-tps=0 \nAllocationByType: \nname=NVIDIA-A100-PCIE-80GB, count=2, limit=2, cost=80 \ntotalCost=80 \n"}
+2025-09-12T17:03:42.159924135Z {"level":"DEBUG","ts":"2025-09-12T17:03:42.155Z","msg":"System data prepared for optimization: - { servers: [  {   name: sample-deployment:llm-d-sim,   class: Premium,   model: default/default,   keepAccelerator: true,   minNumReplicas: 1,   maxBatchSize: 4,   currentAlloc: {    accelerator: A100,    numReplicas: 2,    maxBatch: 256,    cost: 80,    itlAverage: 20,    waitAverage: 0,    load: {     arrivalRate: 41.32,     avgLength: 178,     arrivalCOV: 0,     serviceCOV: 0    }   },   desiredAlloc: {    accelerator: ,    numReplicas: 0,    maxBatch: 0,    cost: 0,    itlAverage: 0,    waitAverage: 0,    load: {     arrivalRate: 0,     avgLength: 0,     arrivalCOV: 0,     serviceCOV: 0    }   }  } ]}"}
+2025-09-12T17:03:42.159926301Z {"level":"DEBUG","ts":"2025-09-12T17:03:42.155Z","msg":"Optimization solution - system: Solution: \ns=sample-deployment:llm-d-sim; c=Premium; m=default/default; rate=41.32; tk=178; sol=1, sat=false, alloc={acc=A100; num=2; maxBatch=4; cost=80, val=0, servTime=21.509005, waitTime=78.63574, rho=0.72974753, maxRPM=25.31145}; slo-itl=24, slo-ttw=500, slo-tps=0 \nAllocationByType: \nname=NVIDIA-A100-PCIE-80GB, count=2, limit=2, cost=80 \ntotalCost=80 \n"}
 2025-09-12T17:03:42.159927260Z {"level":"DEBUG","ts":"2025-09-12T17:03:42.155Z","msg":"Optimization completed successfully, emitting optimization metrics"}
 2025-09-12T17:03:42.159928093Z {"level":"DEBUG","ts":"2025-09-12T17:03:42.155Z","msg":"Optimized allocation map - numKeys: 1, updateList_count: 1"}
-2025-09-12T17:03:42.159928926Z {"level":"DEBUG","ts":"2025-09-12T17:03:42.155Z","msg":"Optimized allocation entry - key: vllme-deployment, value: {2025-09-12 17:03:42.155767718 +0000 UTC m=+2434.958473746 A100 2}"}
+2025-09-12T17:03:42.159928926Z {"level":"DEBUG","ts":"2025-09-12T17:03:42.155Z","msg":"Optimized allocation entry - key: sample-deployment, value: {2025-09-12 17:03:42.155767718 +0000 UTC m=+2434.958473746 A100 2}"}
 2025-09-12T17:03:42.159930093Z {"level":"DEBUG","ts":"2025-09-12T17:03:42.155Z","msg":"Optimization metrics emitted, starting to process variants - variant_count: 1"}
-2025-09-12T17:03:42.159930885Z {"level":"DEBUG","ts":"2025-09-12T17:03:42.155Z","msg":"Processing variant - index: 0, variantAutoscaling-name: vllme-deployment, namespace: llm-d-sim, has_optimized_alloc: true"}
-2025-09-12T17:03:42.159932093Z {"level":"DEBUG","ts":"2025-09-12T17:03:42.155Z","msg":"EmitReplicaMetrics completed for variantAutoscaling-name: vllme-deployment, current-replicas: 2, desired-replicas: 2, accelerator: A100"}
-2025-09-12T17:03:42.159933010Z {"level":"DEBUG","ts":"2025-09-12T17:03:42.155Z","msg":"Successfully emitted optimization signals for external autoscalers - variant: vllme-deployment"}
+2025-09-12T17:03:42.159930885Z {"level":"DEBUG","ts":"2025-09-12T17:03:42.155Z","msg":"Processing variant - index: 0, variantAutoscaling-name: sample-deployment, namespace: llm-d-sim, has_optimized_alloc: true"}
+2025-09-12T17:03:42.159932093Z {"level":"DEBUG","ts":"2025-09-12T17:03:42.155Z","msg":"EmitReplicaMetrics completed for variantAutoscaling-name: sample-deployment, current-replicas: 2, desired-replicas: 2, accelerator: A100"}
+2025-09-12T17:03:42.159933010Z {"level":"DEBUG","ts":"2025-09-12T17:03:42.155Z","msg":"Successfully emitted optimization signals for external autoscalers - variant: sample-deployment"}
 2025-09-12T17:03:42.172232926Z {"level":"DEBUG","ts":"2025-09-12T17:03:42.172Z","msg":"Completed variant processing loop"}
 2025-09-12T17:03:42.172298176Z {"level":"INFO","ts":"2025-09-12T17:03:42.172Z","msg":"Reconciliation completed - variants_processed: 1, optimization_successful: true"}
 ```
 
-### KEDA ScaleObject Configuration Example (`config/samples/keda-scaled-object-vllme.yaml`)
+### KEDA ScaledObject Configuration Example (`config/samples/keda-scaled-object.yaml`)
 
 ```yaml
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:
-  name: vllme-deployment-scaler
+  name: sample-deployment-scaler
   namespace: llm-d-sim
   labels:
-    app: vllme-deployment
+    app: sample-deployment
     scaler: keda-workload-variant-autoscaler
 spec:
   # Target deployment to scale
   scaleTargetRef:
     apiVersion: apps/v1                  # default
     kind: Deployment                     # default
-    name: vllme-deployment
+    name: sample-deployment
   
   # Scaling configuration
   pollingInterval: 5                     # Check metrics every 5 seconds
@@ -268,7 +269,7 @@ spec:
   advanced:
     restoreToOriginalReplicaCount: false
     horizontalPodAutoscalerConfig:
-      name: wva-keda-hpa-vllme-deployment
+      name: wva-keda-hpa-sample-deployment
       behavior:
         scaleDown:
           stabilizationWindowSeconds: 0
@@ -300,7 +301,7 @@ spec:
       # Use wva_desired_replicas as the scaling metric
       query: |
         wva_desired_replicas{
-          variant_name="vllme-deployment",
+          variant_name="sample-deployment",
           exported_namespace="llm-d-sim"
         }
 
