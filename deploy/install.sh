@@ -165,6 +165,11 @@ start_apiservice_guard() {
     (
         while true; do
             sleep 10
+            # Exit if cluster is gone (e.g. kind cluster deleted) to avoid spamming the terminal
+            if ! kubectl cluster-info &>/dev/null; then
+                echo "[apiservice-guard] Cluster unreachable, stopping guard"
+                exit 0
+            fi
             current_svc=$(kubectl get apiservice v1beta1.external.metrics.k8s.io \
                 -o jsonpath='{.spec.service.name}' 2>/dev/null || echo "")
             current_ns=$(kubectl get apiservice v1beta1.external.metrics.k8s.io \

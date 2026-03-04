@@ -167,18 +167,20 @@ jobs:
             -f visibility='public' || echo "::warning::Could not set chart package to public — may need manual update"
 
       # -----------------------------------------
-      # 11. Commit updated chart files
+      # 11. Commit updated chart files back to default branch
       # -----------------------------------------
       - name: Commit updated Helm chart files
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
+          CHART_DIR="charts/workload-variant-autoscaler"
+          # Save release-patched chart files (they are lost when we checkout default branch)
+          cp "$CHART_DIR/Chart.yaml" Chart.yaml.release
+          cp "$CHART_DIR/values.yaml" values.yaml.release
+
           # Configure Git user to match the person who triggered the release
-          # This ensures each person is responsible for their own release commits
           git config user.name "${{ github.actor }}"
           git config user.email "${{ github.actor }}@users.noreply.github.com"
-
-          # Configure remote to use github.token (belongs to the person who triggered workflow)
           git remote set-url origin https://${{ github.token }}@github.com/${{ github.repository }}.git
 
           # Checkout the default branch (we're in detached HEAD from tag checkout)
@@ -186,15 +188,13 @@ jobs:
           DEFAULT_BRANCH=$(git remote show origin | grep "HEAD branch" | cut -d' ' -f5 || echo "main")
           git checkout $DEFAULT_BRANCH
           git pull origin $DEFAULT_BRANCH
-          
-          # Stage changes
-          git add charts/workload-variant-autoscaler/Chart.yaml
-          git add charts/workload-variant-autoscaler/values.yaml
 
-          # Commit with message showing who created the release
+          # Restore the release version into the repo so the commit updates the chart
+          cp Chart.yaml.release "$CHART_DIR/Chart.yaml"
+          cp values.yaml.release "$CHART_DIR/values.yaml"
+
+          git add "$CHART_DIR/Chart.yaml" "$CHART_DIR/values.yaml"
           COMMIT_MSG="Release ${{ steps.version.outputs.tag }}: update Chart.yaml and values.yaml"
           git commit -m "$COMMIT_MSG" || echo "No changes to commit"
-          
           # Push directly to main (bypass enabled via role-based permissions)
-          # The person who triggered the workflow must have Write/Maintain role with bypass
           git push origin $DEFAULT_BRANCH || echo "Push failed - ensure your role has bypass permissions"

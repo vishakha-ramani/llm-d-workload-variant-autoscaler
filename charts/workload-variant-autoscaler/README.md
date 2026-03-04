@@ -1,8 +1,15 @@
 # workload-variant-autoscaler
 
-![Version: 0.4.1](https://img.shields.io/badge/Version-0.4.1-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square) ![AppVersion: v0.4.1](https://img.shields.io/badge/AppVersion-v0.4.1-informational?style=flat-square)
+![Version: 0.5.1](https://img.shields.io/badge/Version-0.5.1-informational?style=flat-square) ![Type: application](https://img.shields.io/badge/Type-application-informational?style=flat-square) ![AppVersion: v0.5.1](https://img.shields.io/badge/AppVersion-v0.5.1-informational?style=flat-square)
 
 Helm chart for Workload-Variant-Autoscaler (WVA) - GPU-aware autoscaler for LLM inference workloads
+
+### Chart registry (OCI)
+
+The chart is published to GitHub Container Registry under the **llm-d** org (not llm-d-incubation). Use this OCI URL in Helm or Helmfile:
+
+- **OCI URL:** `oci://ghcr.io/llm-d/workload-variant-autoscaler`
+- **Example:** `helm pull oci://ghcr.io/llm-d/workload-variant-autoscaler --version 0.5.1`
 
 ## Installation (OpenShift)
 Helm is the recommended installation method. Before running, be sure to delete all previous helm installations for `workload-variant-autoscaler` and `prometheus-adapter`. To list all helm charts installed in the cluster run `helm ls -A`.
@@ -11,7 +18,7 @@ Helm is the recommended installation method. Before running, be sure to delete a
 ```
 export OWNER="llm-d"
 export WVA_PROJECT="llm-d-workload-variant-autoscaler"
-export WVA_RELEASE="v0.5.0"
+export WVA_RELEASE="v0.5.1"
 export WVA_NS="workload-variant-autoscaler-system"
 export MON_NS="openshift-user-workload-monitoring"
 
