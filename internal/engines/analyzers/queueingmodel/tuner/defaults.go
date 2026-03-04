@@ -26,9 +26,18 @@ const (
 	// determines the limit on the amount of change in a state value per iteration. A small number results in the filter converging relatively slowly.
 	DefaultPercentChange = 0.05
 
+	// default parameter values (state vector)
+	DefaultAlpha = 5.0
+	DefaultBeta  = 0.05
+	DefaultGamma = 0.00005
+
 	// default min and max state factors determine the lower and upper bound on the state values.
-	DefaultMinStateFactor = 0.1
-	DefaultMaxStateFactor = 10
+	DefaultMinStateFactor = 0.01
+	DefaultMaxStateFactor = 100.0
+
+	// default expected observation values
+	DefaultExpectedTTFT = 50.0
+	DefaultExpectedITL  = 5.0
 
 	/*
 		Under nominal conditions, the NIS (Normalized Innovations Squared) of a Kalman Filter is expected to follow

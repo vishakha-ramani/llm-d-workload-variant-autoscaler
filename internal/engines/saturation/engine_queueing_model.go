@@ -28,7 +28,7 @@ func (e *Engine) optimizeQueueingModel(
 	// update analyzer given current models
 	currentModelKeys := make(map[string]bool, len(modelGroups))
 	for _, modelVAs := range modelGroups {
-		namespace := modelVAs[0].Namespace
+		namespace := modelVAs[0].Namespace // there should be at least one VA in a model group
 		modelID := modelVAs[0].Spec.ModelID
 		currentModelKeys[queueingmodel.MakeModelKey(namespace, modelID)] = true
 	}

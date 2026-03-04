@@ -7,8 +7,7 @@ import (
 
 // ParameterStore holds learned parameters for variants of a model/namespace.
 type ParameterStore struct {
-	// TODO: check if lock is needed, as the analysis of a single model is sequential
-	mu     sync.RWMutex
+	mu     sync.RWMutex                  // needed if processing multiple variants for a model in parallel
 	params map[string]*LearnedParameters // key: namespace/variantName
 }
 

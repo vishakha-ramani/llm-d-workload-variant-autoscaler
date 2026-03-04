@@ -3,6 +3,7 @@ package queueingmodel
 import (
 	"fmt"
 
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/queueingmodel/tuner"
 	"gonum.org/v1/gonum/mat"
 )
 
@@ -43,4 +44,22 @@ func MakeModelKey(namespace, modelID string) string {
 // makeVariantKey creates a unique key for a variant
 func makeVariantKey(namespace, variantName string) string {
 	return fmt.Sprintf("%s/%s", namespace, variantName)
+}
+
+func StateVectorToParams(v []float64) (alpha, beta, gamma float64) {
+	if len(v) < 3 {
+		return 0, 0, 0
+	}
+	alpha = v[tuner.StateIndexAlpha]
+	beta = v[tuner.StateIndexBeta]
+	gamma = v[tuner.StateIndexGamma]
+	return alpha, beta, gamma
+}
+
+func ParamsToStateVector(alpha, beta, gamma float64) (v []float64) {
+	v = make([]float64, 3)
+	v[tuner.StateIndexAlpha] = alpha
+	v[tuner.StateIndexBeta] = beta
+	v[tuner.StateIndexGamma] = gamma
+	return v
 }

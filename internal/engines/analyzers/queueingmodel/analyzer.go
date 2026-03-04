@@ -19,7 +19,7 @@ import (
 //  3. Computing capacity signals for scaling decisions
 
 type QueueingModelAnalyzer struct {
-	// modelsParameterStore caches learned parameters of variants for all models
+	// modelsParameterStore stores learned parameters of variants for all models
 	modelsParameterStore map[string]*ParameterStore // key: modelKey (namespace/modelID)
 }
 
@@ -33,6 +33,49 @@ func NewQueueingModelAnalyzer() *QueueingModelAnalyzer {
 // Name implements interfaces.Analyzer.
 func (a *QueueingModelAnalyzer) Name() string {
 	return QueueingModelAnalyzerName
+}
+
+// Update deletes non-existing models from paramStore[models]
+// and adds new models to the store
+func (a *QueueingModelAnalyzer) Update(currentModels map[string]bool) {
+	// delete non-existing models
+	deletedModels := []string{}
+	for modelKey := range a.modelsParameterStore {
+		if _, exists := currentModels[modelKey]; !exists {
+			deletedModels = append(deletedModels, modelKey)
+		}
+	}
+	for _, modelKey := range deletedModels {
+		delete(a.modelsParameterStore, modelKey)
+	}
+
+	// add new models
+	for modelKey := range currentModels {
+		if _, exists := a.modelsParameterStore[modelKey]; !exists {
+			a.modelsParameterStore[modelKey] = NewParameterStore()
+		}
+	}
+}
+
+// get parameters for a given model, namespace, and variant (nil if does not exist)
+func (a *QueueingModelAnalyzer) getParams(modelID, namespace, variantName string) (params *LearnedParameters) {
+	modelKey := MakeModelKey(namespace, modelID)
+	if pStore, exists := a.modelsParameterStore[modelKey]; exists {
+		params = pStore.Get(namespace, variantName)
+	}
+	return params
+}
+
+// set parameters for a given model, namespace, and variant
+func (a *QueueingModelAnalyzer) setParams(modelID, namespace, variantName string, params *LearnedParameters) {
+	modelKey := MakeModelKey(namespace, modelID)
+	pStore := a.modelsParameterStore[modelKey]
+	// this shouldn't happen as Update() makes sure that there are entries for all current models
+	if pStore == nil {
+		a.modelsParameterStore[modelKey] = NewParameterStore()
+		pStore = a.modelsParameterStore[modelKey]
+	}
+	pStore.Set(namespace, variantName, params)
 }
 
 // Analyze implements interfaces.Analyzer.
@@ -130,7 +173,7 @@ func (a *QueueingModelAnalyzer) updateVariantParameters(
 	// Run tuner for each variant
 	for variantName, replicaMetrics := range variantMetrics {
 		// Build environment from aggregated replica metrics
-		env, err := a.buildEnvironmentFromMetrics(variantName, replicaMetrics)
+		env, err := buildEnvironmentFromMetrics(variantName, replicaMetrics)
 		if err != nil {
 			logger.V(1).Info("Failed to build environment for variant",
 				"variant", variantName,
@@ -140,7 +183,7 @@ func (a *QueueingModelAnalyzer) updateVariantParameters(
 		}
 
 		// Create a tuner for this variant
-		tuner, err := a.createTuner(ctx, namespace, variantName, modelID, env, config.FilterConfig)
+		tuner, err := a.createTunerForVariant(ctx, namespace, modelID, variantName, env, config.FilterConfig)
 		if err != nil {
 			logger.V(1).Info("Failed to get/create tuner for variant",
 				"variant", variantName,
@@ -160,7 +203,7 @@ func (a *QueueingModelAnalyzer) updateVariantParameters(
 		}
 
 		// Store tuned parameters
-		a.storeParametersFromResults(namespace, variantName, modelID, results)
+		a.storeParametersFromResults(namespace, modelID, variantName, results)
 
 		// Log tuning results
 		if results.ValidationFailed {
@@ -338,23 +381,6 @@ func (a *QueueingModelAnalyzer) computeAllVariantCapacities(
 	return variantCapacities
 }
 
-func (a *QueueingModelAnalyzer) emptyResult(input interfaces.AnalyzerInput) *interfaces.AnalyzerResult {
-	return &interfaces.AnalyzerResult{
-		AnalyzerName: a.Name(),
-		ModelID:      input.ModelID,
-		Namespace:    input.Namespace,
-		AnalyzedAt:   time.Now(),
-	}
-}
-
-func aggregateCapacities(capacities []interfaces.VariantCapacity) (supply, demand float64) {
-	for _, c := range capacities {
-		supply += c.TotalCapacity
-		demand += c.TotalDemand
-	}
-	return
-}
-
 // guessSLOFromMetrics infers SLO targets from the queueing model when no
 // explicit SLO configuration is provided.
 //
@@ -436,13 +462,116 @@ func (a *QueueingModelAnalyzer) guessSLOFromMetrics(
 
 	// Fallback: use observed latencies with headroom when learned params
 	// are not yet available (cold start / early tuning cycles)
-	return a.fallbackSLOFromObservations(ctx, wm)
+	return fallbackSLOFromObservations(ctx, wm)
+}
+
+// createTunerForVariant creates a new tuner instance for a variant.
+// If parameters exist in the store, uses the stored state and covariance.
+// Otherwise, attempts to guess initial state from environment metrics.
+func (a *QueueingModelAnalyzer) createTunerForVariant(
+	ctx context.Context,
+	namespace string,
+	modelID string,
+	variantName string,
+	env *tuner.Environment,
+	filterConfig *tuner.FilterData,
+) (*tuner.Tuner, error) {
+	logger := ctrl.LoggerFrom(ctx)
+
+	// Check if we have existing parameters
+	existingParams := a.getParams(modelID, namespace, variantName)
+
+	// Get base tuner config (uses user config or defaults)
+	tunerConfig := tuner.CreateTunerConfigFromData(filterConfig, env)
+
+	if existingParams != nil {
+		// Restore state and covariance from previous tuning cycle
+		logger.V(1).Info("Restoring tuner state from parameter store",
+			"variant", variantName,
+			"namespace", namespace,
+			"alpha", existingParams.Alpha,
+			"beta", existingParams.Beta,
+			"gamma", existingParams.Gamma)
+
+		tunerConfig.ModelData.InitState = ParamsToStateVector(
+			float64(existingParams.Alpha),
+			float64(existingParams.Beta),
+			float64(existingParams.Gamma))
+
+		flatCov := flattenCovariance(existingParams.Covariance)
+		if flatCov != nil {
+			tunerConfig.ModelData.InitCovarianceMatrix = flatCov
+		}
+	} else {
+		// No existing parameters - attempt to guess initial state from metrics
+		logger.V(1).Info("No existing parameters found, attempting to guess initial state",
+			"variant", variantName,
+			"namespace", namespace)
+
+		state, err := guessInitState(env)
+		if err != nil {
+			logger.V(1).Info("Failed to guess initial state, using defaults",
+				"variant", variantName,
+				"namespace", namespace,
+				"error", err)
+			// tunerConfig already has default InitState, so we can proceed
+		} else {
+			alpha, beta, gamma := StateVectorToParams(state)
+			logger.V(1).Info("Using guessed initial state",
+				"variant", variantName,
+				"namespace", namespace,
+				"alpha", alpha,
+				"beta", beta,
+				"gamma", gamma)
+			tunerConfig.ModelData.InitState = state
+			// Update bounds based on guessed state
+			tunerConfig.ModelData.MinState = tuner.GetFactoredSlice(state, tuner.DefaultMinStateFactor)
+			tunerConfig.ModelData.MaxState = tuner.GetFactoredSlice(state, tuner.DefaultMaxStateFactor)
+		}
+	}
+
+	// Create new tuner instance with environment
+	t, err := tuner.NewTuner(tunerConfig, env)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create tuner: %w", err)
+	}
+
+	return t, nil
+}
+
+// storeParametersFromResults saves tuned results to the parameter store.
+func (a *QueueingModelAnalyzer) storeParametersFromResults(
+	namespace, modelID, variantName string,
+	results *tuner.TunedResults,
+) {
+	// Extract covariance matrix
+	covariance := matrixToSlice2D(results.Covariance)
+
+	params := &LearnedParameters{
+		Alpha:       results.ServiceParms.Alpha,
+		Beta:        results.ServiceParms.Beta,
+		Gamma:       results.ServiceParms.Gamma,
+		NIS:         results.NIS,
+		Covariance:  covariance,
+		LastUpdated: time.Now(),
+	}
+
+	a.setParams(modelID, namespace, variantName, params)
+}
+
+func (a *QueueingModelAnalyzer) emptyResult(input interfaces.AnalyzerInput) *interfaces.AnalyzerResult {
+	return &interfaces.AnalyzerResult{
+		AnalyzerName: a.Name(),
+		ModelID:      input.ModelID,
+		Namespace:    input.Namespace,
+		AnalyzedAt:   time.Now(),
+	}
 }
 
 // fallbackSLOFromObservations creates SLO targets from observed TTFT/ITL
 // with a headroom multiplier and reasonable caps. Used during cold start
 // before the Kalman filter has learned hardware parameters.
-func (a *QueueingModelAnalyzer) fallbackSLOFromObservations(
+func fallbackSLOFromObservations(
 	ctx context.Context,
 	wm *workloadMetrics,
 ) *SLOTarget {
@@ -507,20 +636,11 @@ func aggregateWorkloadMetrics(metrics []interfaces.ReplicaMetrics) *workloadMetr
 	}
 }
 
-// groupMetricsByVariant groups replica metrics by variant name.
-func groupMetricsByVariant(metrics []interfaces.ReplicaMetrics) map[string][]*interfaces.ReplicaMetrics {
-	grouped := make(map[string][]*interfaces.ReplicaMetrics)
-	for _, m := range metrics {
-		grouped[m.VariantName] = append(grouped[m.VariantName], &m)
-	}
-	return grouped
-}
-
 // buildEnvironmentFromMetrics creates a tuner Environment from aggregated replica metrics.
 // Aggregates per-replica metrics (arrival rate, avg tokens, TTFT, ITL, max batch size)
 // into a single Environment representing the variant's current operating state.
 // Returns error if required metrics are unavailable.
-func (a *QueueingModelAnalyzer) buildEnvironmentFromMetrics(
+func buildEnvironmentFromMetrics(
 	variantName string,
 	metrics []*interfaces.ReplicaMetrics,
 ) (*tuner.Environment, error) {
@@ -591,163 +711,6 @@ func (a *QueueingModelAnalyzer) buildEnvironmentFromMetrics(
 	return env, nil
 }
 
-// createTuner creates a new tuner instance for a variant.
-// If parameters exist in the store, uses the stored state and covariance.
-// Otherwise, attempts to guess initial state from environment metrics.
-func (a *QueueingModelAnalyzer) createTuner(
-	ctx context.Context,
-	namespace string,
-	variantName string,
-	modelID string,
-	env *tuner.Environment,
-	filterConfig *tuner.FilterData,
-) (*tuner.Tuner, error) {
-	logger := ctrl.LoggerFrom(ctx)
-
-	// Check if we have existing parameters
-	existingParams := a.getParams(modelID, namespace, variantName)
-
-	// Get base tuner config (uses user config or defaults)
-	tunerConfig := a.getTunerConfig(filterConfig, env)
-
-	if existingParams != nil {
-		// Restore state and covariance from previous tuning cycle
-		logger.V(1).Info("Restoring tuner state from parameter store",
-			"variant", variantName,
-			"namespace", namespace,
-			"alpha", existingParams.Alpha,
-			"beta", existingParams.Beta,
-			"gamma", existingParams.Gamma)
-
-		stateVec := make([]float64, 3)
-		stateVec[tuner.StateIndexAlpha] = float64(existingParams.Alpha)
-		stateVec[tuner.StateIndexBeta] = float64(existingParams.Beta)
-		stateVec[tuner.StateIndexGamma] = float64(existingParams.Gamma)
-		tunerConfig.ModelData.InitState = stateVec
-
-		flatCov := flattenCovariance(existingParams.Covariance)
-		if flatCov != nil {
-			tunerConfig.ModelData.InitCovarianceMatrix = flatCov
-		}
-	} else {
-		// No existing parameters - attempt to guess initial state from metrics
-		logger.V(1).Info("No existing parameters found, attempting to guess initial state",
-			"variant", variantName,
-			"namespace", namespace)
-
-		state, err := a.guessInitState(env)
-		if err != nil {
-			logger.V(1).Info("Failed to guess initial state, using defaults",
-				"variant", variantName,
-				"namespace", namespace,
-				"error", err)
-			// tunerConfig already has default InitState, so we can proceed
-		} else {
-			logger.V(1).Info("Using guessed initial state",
-				"variant", variantName,
-				"namespace", namespace,
-				"alpha", state[tuner.StateIndexAlpha],
-				"beta", state[tuner.StateIndexBeta],
-				"gamma", state[tuner.StateIndexGamma])
-			tunerConfig.ModelData.InitState = state
-			// Update bounds based on guessed state
-			tunerConfig.ModelData.MinState = getFactoredState(state, tuner.DefaultMinStateFactor)
-			tunerConfig.ModelData.MaxState = getFactoredState(state, tuner.DefaultMaxStateFactor)
-		}
-	}
-
-	// Create new tuner instance with environment
-	t, err := tuner.NewTuner(tunerConfig, env)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create tuner: %w", err)
-	}
-
-	return t, nil
-}
-
-// getTunerConfig builds a TunerConfigData for a specific variant.
-// FilterData is shared for all variants (from filterConfig or defaults). TunerModelData is always
-// built per-variant from the environment because different variants run on
-// different accelerators with different latency characteristics.
-func (a *QueueingModelAnalyzer) getTunerConfig(filterConfig *tuner.FilterData, env *tuner.Environment) *tuner.TunerConfigData {
-	// FilterData: use user-provided config or defaults
-	filterData := tuner.FilterData{
-		GammaFactor: tuner.DefaultGammaFactor,
-		ErrorLevel:  tuner.DefaultErrorLevel,
-		TPercentile: tuner.DefaultTPercentile,
-	}
-	if filterConfig != nil {
-		filterData = *filterConfig
-	}
-
-	// TunerModelData: always built per-variant from environment
-	// State vector: [alpha, beta, gamma]
-	// Using reasonable initial estimates (will be refined by filter)
-	initState := []float64{10.0, 0.5, 0.1} // alpha=10ms, beta=0.5ms/token, gamma=0.1ms/token
-
-	// Percent change per parameter (using DefaultPercentChange)
-	percentChange := []float64{
-		tuner.DefaultPercentChange,
-		tuner.DefaultPercentChange,
-		tuner.DefaultPercentChange,
-	}
-
-	// State bounds using factors
-	minState := getFactoredState(initState, tuner.DefaultMinStateFactor)
-	maxState := getFactoredState(initState, tuner.DefaultMaxStateFactor)
-
-	// Expected observations [TTFT, ITL] in milliseconds
-	// Use actual observations from environment if valid, otherwise use typical values
-	expectedObservations := []float64{50.0, 5.0} // Typical TTFT=50ms, ITL=5ms
-	if env != nil && env.Valid() {
-		expectedObservations = []float64{float64(env.AvgTTFT), float64(env.AvgITL)}
-	}
-
-	return &tuner.TunerConfigData{
-		FilterData: filterData,
-		ModelData: tuner.TunerModelData{
-			InitState:            initState,
-			InitCovarianceMatrix: nil, // Will use defaults in tuner
-			PercentChange:        percentChange,
-			BoundedState:         true,
-			MinState:             minState,
-			MaxState:             maxState,
-			ExpectedObservations: expectedObservations,
-		},
-	}
-}
-
-// storeParametersFromResults saves tuned results to the parameter store.
-func (a *QueueingModelAnalyzer) storeParametersFromResults(
-	namespace string,
-	variantName string,
-	modelID string,
-	results *tuner.TunedResults,
-) {
-	// Extract covariance matrix
-	covariance := matrixToSlice2D(results.Covariance)
-
-	params := &LearnedParameters{
-		Alpha:       results.ServiceParms.Alpha,
-		Beta:        results.ServiceParms.Beta,
-		Gamma:       results.ServiceParms.Gamma,
-		NIS:         results.NIS,
-		Covariance:  covariance,
-		LastUpdated: time.Now(),
-	}
-
-	a.setParams(modelID, namespace, variantName, params)
-}
-
-// getFactoredState multiplies each element in state by multiplier and returns the new slice.
-func getFactoredState(state []float64, multiplier float64) []float64 {
-	result := make([]float64, len(state))
-	for i, val := range state {
-		result[i] = val * multiplier
-	}
-	return result
-}
-
 // guessInitState makes an initial guess of the state estimates based on observed metrics.
 // Uses the queueing model from the paper to derive parameters alpha, beta, gamma from observed TTFT and ITL.
 //
@@ -762,7 +725,7 @@ func getFactoredState(state []float64, multiplier float64) []float64 {
 //   - gamma: KV cache memory access time per token
 //   - i_l: average input tokens
 //   - o_l: average output tokens
-func (a *QueueingModelAnalyzer) guessInitState(env *tuner.Environment) ([]float64, error) {
+func guessInitState(env *tuner.Environment) ([]float64, error) {
 	// Validate environment
 	if env == nil || !env.Valid() {
 		return nil, fmt.Errorf("invalid environment for guessing initial state")
@@ -830,47 +793,22 @@ func (a *QueueingModelAnalyzer) guessInitState(env *tuner.Environment) ([]float6
 			gamma, ttft, itl, inputToks, outputToks)
 	}
 
-	// Return state vector [alpha, beta, gamma]
-	return []float64{alpha, beta, gamma}, nil
+	return ParamsToStateVector(alpha, beta, gamma), nil
 }
 
-// Update deletes non-existing models from paramStore[models]
-// and adds new models to the store
-func (a *QueueingModelAnalyzer) Update(currentModels map[string]bool) {
-	// delete non-existing models
-	deletedModels := []string{}
-	for modelKey := range a.modelsParameterStore {
-		if _, exists := currentModels[modelKey]; !exists {
-			deletedModels = append(deletedModels, modelKey)
-		}
+func aggregateCapacities(capacities []interfaces.VariantCapacity) (supply, demand float64) {
+	for _, c := range capacities {
+		supply += c.TotalCapacity
+		demand += c.TotalDemand
 	}
-	for _, modelKey := range deletedModels {
-		delete(a.modelsParameterStore, modelKey)
-	}
-
-	// add new models
-	for modelKey := range currentModels {
-		if _, exists := a.modelsParameterStore[modelKey]; !exists {
-			a.modelsParameterStore[modelKey] = NewParameterStore()
-		}
-	}
+	return
 }
 
-// get parameters for a given model, namespace, and variant (nil if does not exist)
-func (a *QueueingModelAnalyzer) getParams(modelID, namespace, variantName string) (params *LearnedParameters) {
-	if pStore, exists := a.modelsParameterStore[modelID]; exists {
-		params = pStore.Get(namespace, variantName)
+// groupMetricsByVariant groups replica metrics by variant name.
+func groupMetricsByVariant(metrics []interfaces.ReplicaMetrics) map[string][]*interfaces.ReplicaMetrics {
+	grouped := make(map[string][]*interfaces.ReplicaMetrics)
+	for _, m := range metrics {
+		grouped[m.VariantName] = append(grouped[m.VariantName], &m)
 	}
-	return params
-}
-
-// set parameters for a given model, namespace, and variant
-func (a *QueueingModelAnalyzer) setParams(modelID, namespace, variantName string, params *LearnedParameters) {
-	pStore := a.modelsParameterStore[modelID]
-	// this shouldn't happen as Update() makes sure that there are entries for all current models
-	if pStore == nil {
-		a.modelsParameterStore[modelID] = NewParameterStore()
-		pStore = a.modelsParameterStore[modelID]
-	}
-	pStore.Set(namespace, variantName, params)
+	return grouped
 }
