@@ -32,7 +32,7 @@ func NewQueueingModelAnalyzer() *QueueingModelAnalyzer {
 
 // Name implements interfaces.Analyzer.
 func (a *QueueingModelAnalyzer) Name() string {
-	return QueueingModelAnalyzerName
+	return interfaces.QueueingModelAnalyzerName
 }
 
 // Update deletes non-existing models from paramStore[models]
@@ -108,6 +108,7 @@ func (a *QueueingModelAnalyzer) Analyze(
 	}
 
 	// Get SLO targets
+	// TODO: store the time series for SLO and smooth the SLO target.
 	sloTarget := a.getSLOTarget(ctx, namespace, modelID, qConfig, input.ReplicaMetrics)
 	if sloTarget == nil {
 		logger.Info("No SLO targets", "modelID", modelID)
@@ -659,6 +660,8 @@ func buildEnvironmentFromMetrics(
 	}
 
 	// Aggregate per-pod traffic metrics across replicas
+	// TODO: option 1: TTFT and ITL must be weighted based on the arrival rate
+	// TODO: option 2, just take any one pod (maybe the oldest?) that is a good representative of a variant load statistics.
 	var totalArrivalRate float64
 	var totalInputToks, totalOutputToks float64
 	var totalTTFT, totalITL float64

@@ -2,6 +2,7 @@ package queueingmodel
 
 import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/engines/analyzers/queueingmodel/tuner"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/interfaces"
 )
 
 // QueueingModelConfig implements interfaces.AnalyzerConfig
@@ -37,7 +38,7 @@ type SLOTarget struct {
 
 // GetAnalyzerName implements interfaces.AnalyzerConfig
 func (c *QueueingModelConfig) GetAnalyzerName() string {
-	return QueueingModelAnalyzerName
+	return interfaces.QueueingModelAnalyzerName
 }
 
 // GetSLOForModel retrieves SLO targets for a model in a namespace

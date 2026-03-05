@@ -82,6 +82,8 @@ func (r *ConfigMapReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		r.handleSaturationConfigMap(ctx, cm, namespace, isGlobal)
 	case config.DefaultScaleToZeroConfigMapName:
 		r.handleScaleToZeroConfigMap(ctx, cm, namespace, isGlobal)
+	case config.QueueingModelConfigMapName():
+		r.handleQueueingModelConfigMap(ctx, cm, namespace, isGlobal)
 	default:
 		logger.V(1).Info("Ignoring unrecognized ConfigMap", "name", name, "namespace", namespace)
 	}
@@ -119,6 +121,9 @@ func (r *ConfigMapReconciler) handleConfigMapDeletion(ctx context.Context, name,
 	} else if name == config.DefaultScaleToZeroConfigMapName {
 		r.Config.RemoveNamespaceConfig(namespace)
 		logger.Info("Removed namespace-local scale-to-zero config on ConfigMap deletion", "namespace", namespace)
+	} else if name == config.QueueingModelConfigMapName() {
+		r.Config.RemoveNamespaceConfig(namespace)
+		logger.Info("Removed namespace-local queueing model config on ConfigMap deletion", "namespace", namespace)
 	}
 }
 
@@ -190,5 +195,23 @@ func (r *ConfigMapReconciler) handleScaleToZeroConfigMap(ctx context.Context, cm
 	} else {
 		r.Config.UpdateScaleToZeroConfigForNamespace(namespace, scaleToZeroConfig)
 		logger.Info("Updated namespace-local scale-to-zero config from ConfigMap", "namespace", namespace, "modelCount", len(scaleToZeroConfig))
+	}
+}
+
+// handleQueueingModelConfigMap handles updates to the queueing model ConfigMap.
+// Supports both global and namespace-local ConfigMaps.
+func (r *ConfigMapReconciler) handleQueueingModelConfigMap(ctx context.Context, cm *corev1.ConfigMap, namespace string, isGlobal bool) {
+	logger := log.FromContext(ctx)
+
+	// Parse queue model based scaling config entries
+	configs, count := parseQueueingModelConfig(cm.Data, logger)
+
+	// Update global or namespace-local config
+	if isGlobal {
+		r.Config.UpdateQueueingModelConfig(configs)
+		logger.Info("Updated global queueing model config from ConfigMap", "entries", count)
+	} else {
+		r.Config.UpdateQueueingModelConfigForNamespace(namespace, configs)
+		logger.Info("Updated namespace-local queueing model config from ConfigMap", "namespace", namespace, "entries", count)
 	}
 }

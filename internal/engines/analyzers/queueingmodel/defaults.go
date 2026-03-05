@@ -1,8 +1,6 @@
 package queueingmodel
 
 const (
-	QueueingModelAnalyzerName = "queueing-model"
-
 	// Set the default values when we can't get a server configuration
 	// TODO: collect values from servers
 

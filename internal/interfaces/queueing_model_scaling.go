@@ -2,6 +2,9 @@ package interfaces
 
 import "fmt"
 
+// QueueingModelAnalyzerName is the canonical name for the queueing model analyzer.
+const QueueingModelAnalyzerName = "queueing-model"
+
 // QueueingModelScalingConfig holds configuration for the queueing model analyzer.
 // The queueing model analyzer uses SLO-driven capacity analysis based on
 // queueing theory to determine scaling decisions.
@@ -13,14 +16,16 @@ type QueueingModelScalingConfig struct {
 	Namespace string `yaml:"namespace,omitempty"`
 
 	// SLOMultiplier is the maximum tolerable ratio of iteration time under load
-	// to the idle-state baseline alpha. In the queueing model, mean iteration
-	// time at utilization rho is alpha/(1-rho). Setting the SLO at k*alpha
-	// yields the target utilization rho = 1 - 1/k.
-	// Only the stochastic queueing component (T_iter = k*alpha) is scaled;
-	// deterministic work (prefill and decode token processing) remains at true cost.
-	// Must be > 1.0 (k=1 means rho=0, no load tolerance; k<=1 is physically
+	// to the idle-state baseline latency.
+	// Given such a maximum tolerable ratio, one can then use prefill and decode token processing times
+	// to obtain the maximum tolerable limit for TTFT and ITL.
+	// In our queueing model, mean iteration time at utilization rho is alpha/(1-rho).
+	// Setting the T_iter = k*alpha then yields the target utilization rho = 1 - 1/k.
+	// For example, k=3.0 -> rho = 0.67, k=2.0 -> rho = 0.50, k=5.0 -> rho = 0.80
+	// where rho is the fraction of server capacity consumed by arrivals.
+	// It then follows that k must be > 1.0 (k=1 means rho=0, no load tolerance; k<=1 is physically
 	// meaningless in the queueing model).
-	// Zero value means use default (3.0).
+	// Also note that SLOMultiplier filed set to value 0 value means use default (3.0).
 	SLOMultiplier float64 `yaml:"sloMultiplier,omitempty"`
 
 	// TuningEnabled enables online parameter learning via Kalman filter.
@@ -40,7 +45,7 @@ type QueueingModelScalingConfig struct {
 
 // GetAnalyzerName implements the AnalyzerConfig interface.
 func (c *QueueingModelScalingConfig) GetAnalyzerName() string {
-	return "queueing-model"
+	return QueueingModelAnalyzerName
 }
 
 // Validate checks for invalid configuration values.

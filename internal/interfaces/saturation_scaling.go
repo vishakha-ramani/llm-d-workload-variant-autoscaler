@@ -29,9 +29,10 @@ type SaturationScalingConfig struct {
 	// Default is false (limiter disabled).
 	EnableLimiter bool `yaml:"enableLimiter,omitempty"`
 
-	// AnalyzerName selects which analyzer to use.
+	// AnalyzerName selects which saturation analyzer to use.
 	// "saturation" uses the V2 token-based analyzer.
 	// Empty string (default) uses the V1 percentage-based analyzer.
+	// To use the queueing model analyzer, deploy wva-queueing-model-config instead.
 	AnalyzerName string `yaml:"analyzerName,omitempty"`
 
 	// ScaleUpThreshold is the utilization threshold above which scale-up is triggered.

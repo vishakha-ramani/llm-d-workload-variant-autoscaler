@@ -498,8 +498,8 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 			PrefixCacheHitRate:    data.prefixCacheHitRate,
 			ArrivalRate:           data.arrivalRate,
 			MaxBatchSize:          maxBatchSize,
-			AvgTTFT:              data.avgTTFT,
-			AvgITL:               data.avgITL,
+			AvgTTFT:               data.avgTTFT,
+			AvgITL:                data.avgITL,
 			Metadata: &interfaces.ReplicaMetricsMetadata{
 				CollectedAt:     collectedAt,
 				Age:             0, // Fresh

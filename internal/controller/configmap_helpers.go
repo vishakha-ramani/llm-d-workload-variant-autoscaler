@@ -51,6 +51,28 @@ func parseSaturationConfig(cmData map[string]string, logger logr.Logger) (config
 	return configs, count
 }
 
+// parseQueueingModelConfig parses queueing model configuration from ConfigMap data.
+// Returns the parsed configs and count of successfully parsed entries.
+// Invalid or unparseable entries are skipped with an error log.
+func parseQueueingModelConfig(cmData map[string]string, logger logr.Logger) (config.QueueingModelConfigPerModel, int) {
+	configs := make(config.QueueingModelConfigPerModel)
+	count := 0
+	for key, yamlStr := range cmData {
+		var qmConfig interfaces.QueueingModelScalingConfig
+		if err := yaml.Unmarshal([]byte(yamlStr), &qmConfig); err != nil {
+			logger.Error(err, "Failed to parse queueing model config entry", "key", key)
+			continue
+		}
+		if err := qmConfig.Validate(); err != nil {
+			logger.Error(err, "Invalid queueing model config entry", "key", key)
+			continue
+		}
+		configs[key] = qmConfig
+		count++
+	}
+	return configs, count
+}
+
 // isNamespaceConfigEnabled checks if a namespace has the opt-in label for namespace-local ConfigMaps.
 // This allows namespaces to opt-in for ConfigMap watching even before VAs are created.
 // Package-level function so it can be used by both reconcilers.

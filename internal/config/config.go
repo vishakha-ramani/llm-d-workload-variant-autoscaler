@@ -21,8 +21,9 @@ type Config struct {
 	prometheus     prometheusConfig
 	//epp            eppConfig
 	features    featureFlagsConfig
-	saturation  saturationConfig  // namespace-aware
-	scaleToZero scaleToZeroConfig // namespace-aware
+	saturation    saturationConfig    // namespace-aware
+	queueingModel queueingModelConfig // namespace-aware
+	scaleToZero   scaleToZeroConfig   // namespace-aware
 
 }
 
@@ -76,6 +77,10 @@ type featureFlagsConfig struct {
 // for all models. Maps model ID (or "default" key) to its configuration.
 type SaturationScalingConfigPerModel map[string]interfaces.SaturationScalingConfig
 
+// QueueingModelConfigPerModel represents queueing model scaling configuration
+// for all models. Maps model ID (or "default" key) to its configuration.
+type QueueingModelConfigPerModel map[string]interfaces.QueueingModelScalingConfig
+
 // saturationConfig holds saturation scaling configuration (namespace-aware)
 type saturationConfig struct {
 	// Global default configuration
@@ -83,6 +88,15 @@ type saturationConfig struct {
 
 	// Namespace-local configuration overrides (keyed by namespace name)
 	namespaceConfigs map[string]SaturationScalingConfigPerModel
+}
+
+// queueingModelConfig holds queueing model scaling configuration (namespace-aware)
+type queueingModelConfig struct {
+	// Global default configuration
+	global QueueingModelConfigPerModel
+
+	// Namespace-local configuration overrides (keyed by namespace name)
+	namespaceConfigs map[string]QueueingModelConfigPerModel
 }
 
 // scaleToZeroConfig holds scale-to-zero configuration (namespace-aware)
@@ -479,6 +493,97 @@ func (c *Config) UpdateScaleToZeroConfigForNamespace(namespace string, config Sc
 
 }
 
+// QueueingModelConfig returns the current global queueing model scaling configuration.
+// Thread-safe. Returns a copy to prevent external modifications.
+// For namespace-aware lookups, use QueueingModelConfigForNamespace instead.
+func (c *Config) QueueingModelConfig() map[string]interfaces.QueueingModelScalingConfig {
+	return c.QueueingModelConfigForNamespace("")
+}
+
+// QueueingModelConfigForNamespace returns the queueing model scaling configuration for the given namespace.
+// Resolution order: namespace-local > global
+// Thread-safe. Returns a copy to prevent external modifications.
+// If namespace is empty, returns global config.
+func (c *Config) QueueingModelConfigForNamespace(namespace string) map[string]interfaces.QueueingModelScalingConfig {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	sourceConfig := c.resolveQueueingModelConfig(namespace)
+	return copyQueueingModelConfig(sourceConfig)
+}
+
+// resolveQueueingModelConfig resolves queueing model config for a namespace (namespace-local > global).
+// Must be called while holding at least a read lock.
+func (c *Config) resolveQueueingModelConfig(namespace string) map[string]interfaces.QueueingModelScalingConfig {
+	// Check namespace-local first (if namespace is provided)
+	if namespace != "" {
+		if nsConfig, exists := c.queueingModel.namespaceConfigs[namespace]; exists {
+			if len(nsConfig) > 0 {
+				return nsConfig
+			}
+		}
+	}
+
+	// Fall back to global
+	if len(c.queueingModel.global) > 0 {
+		return c.queueingModel.global
+	}
+
+	return nil
+}
+
+// copyQueueingModelConfig creates a deep copy of the queueing model config map.
+func copyQueueingModelConfig(src map[string]interfaces.QueueingModelScalingConfig) map[string]interfaces.QueueingModelScalingConfig {
+	if src == nil {
+		return make(map[string]interfaces.QueueingModelScalingConfig)
+	}
+	result := make(map[string]interfaces.QueueingModelScalingConfig, len(src))
+	for k, v := range src {
+		result[k] = v
+	}
+	return result
+}
+
+// UpdateQueueingModelConfig updates the global queueing model scaling configuration.
+// Thread-safe. Takes a copy of the provided map to prevent external modifications.
+// For namespace-local updates, use UpdateQueueingModelConfigForNamespace instead.
+func (c *Config) UpdateQueueingModelConfig(config map[string]interfaces.QueueingModelScalingConfig) {
+	c.UpdateQueueingModelConfigForNamespace("", config)
+}
+
+// UpdateQueueingModelConfigForNamespace updates the queueing model scaling configuration for the given namespace.
+// If namespace is empty, updates global config.
+// Thread-safe. Takes a copy of the provided map to prevent external modifications.
+func (c *Config) UpdateQueueingModelConfigForNamespace(namespace string, config map[string]interfaces.QueueingModelScalingConfig) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Make a copy to prevent external modifications
+	newConfig := make(map[string]interfaces.QueueingModelScalingConfig, len(config))
+	maps.Copy(newConfig, config)
+
+	var oldCount int
+	if namespace == "" {
+		// Update global
+		oldCount = len(c.queueingModel.global)
+		c.queueingModel.global = newConfig
+		newCount := len(c.queueingModel.global)
+		if oldCount != newCount {
+			ctrl.Log.Info("Updated global queueing model config", "oldEntries", oldCount, "newEntries", newCount)
+		}
+	} else {
+		// Update namespace-local
+		if c.queueingModel.namespaceConfigs == nil {
+			c.queueingModel.namespaceConfigs = make(map[string]QueueingModelConfigPerModel)
+		}
+		oldCount = len(c.queueingModel.namespaceConfigs[namespace])
+		c.queueingModel.namespaceConfigs[namespace] = newConfig
+		newCount := len(c.queueingModel.namespaceConfigs[namespace])
+		if oldCount != newCount {
+			ctrl.Log.Info("Updated namespace-local queueing model config", "namespace", namespace, "oldEntries", oldCount, "newEntries", newCount)
+		}
+	}
+}
+
 // RemoveNamespaceConfig removes the namespace-local configuration for the given namespace.
 // This is called when a namespace-local ConfigMap is deleted, allowing fallback to global config.
 // Thread-safe.
@@ -492,6 +597,12 @@ func (c *Config) RemoveNamespaceConfig(namespace string) {
 	if c.saturation.namespaceConfigs != nil {
 		if _, exists := c.saturation.namespaceConfigs[namespace]; exists {
 			delete(c.saturation.namespaceConfigs, namespace)
+			removed = true
+		}
+	}
+	if c.queueingModel.namespaceConfigs != nil {
+		if _, exists := c.queueingModel.namespaceConfigs[namespace]; exists {
+			delete(c.queueingModel.namespaceConfigs, namespace)
 			removed = true
 		}
 	}
@@ -556,6 +667,10 @@ func NewTestConfig() *Config {
 		saturation: saturationConfig{
 			global:           make(SaturationScalingConfigPerModel),
 			namespaceConfigs: make(map[string]SaturationScalingConfigPerModel),
+		},
+		queueingModel: queueingModelConfig{
+			global:           make(QueueingModelConfigPerModel),
+			namespaceConfigs: make(map[string]QueueingModelConfigPerModel),
 		},
 		scaleToZero: scaleToZeroConfig{
 			global:           make(ScaleToZeroConfigData),

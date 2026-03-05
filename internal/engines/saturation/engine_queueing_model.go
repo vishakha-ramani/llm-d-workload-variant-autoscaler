@@ -57,7 +57,8 @@ func (e *Engine) optimizeQueueingModel(
 			continue
 		}
 
-		qConfig := buildQueueingModelConfig()
+		qmConfigMap := e.Config.QueueingModelConfigForNamespace(namespace)
+		qConfig := buildQueueingModelConfig(qmConfigMap, namespace, modelID)
 
 		result, err := e.runQueueingModelAnalysis(ctx, modelID, namespace,
 			data.replicaMetrics, qConfig, data.variantStates)
@@ -139,11 +140,59 @@ func (e *Engine) runQueueingModelAnalysis(
 	return result, nil
 }
 
-// buildQueueingModelConfig creates a QueueingModelConfig with defaults.
-// SLO targets are inferred from metrics by the analyzer when not explicitly set.
-func buildQueueingModelConfig() *queueingmodel.QueueingModelConfig {
-	return &queueingmodel.QueueingModelConfig{
+// buildQueueingModelConfig creates a QueueingModelConfig for a specific model.
+// It starts from the "default" entry in allConfigs, then applies any per-model
+// override whose ModelID and Namespace match. Per-model entries can override
+// sloMultiplier, tuningEnabled, and provide explicit SLO targets (targetTTFT/targetITL).
+// Falls back to defaults when fields are zero/nil.
+func buildQueueingModelConfig(
+	allConfigs map[string]interfaces.QueueingModelScalingConfig,
+	namespace, modelID string,
+) *queueingmodel.QueueingModelConfig {
+	cfg := &queueingmodel.QueueingModelConfig{
 		TuningEnabled: true,
 		SLOMultiplier: queueingmodel.DefaultSLOMultiplier,
 	}
+
+	// Apply "default" entry as base
+	if defaultCfg, ok := allConfigs["default"]; ok {
+		if defaultCfg.TuningEnabled != nil {
+			cfg.TuningEnabled = *defaultCfg.TuningEnabled
+		}
+		if defaultCfg.SLOMultiplier > 1.0 {
+			cfg.SLOMultiplier = defaultCfg.SLOMultiplier
+		}
+	}
+
+	// Scan for a per-model override matching this model
+	for key, entry := range allConfigs {
+		if key == "default" {
+			continue
+		}
+		if entry.ModelID != modelID || entry.Namespace != namespace {
+			continue
+		}
+
+		// Override sloMultiplier and tuningEnabled from per-model entry
+		if entry.SLOMultiplier > 1.0 {
+			cfg.SLOMultiplier = entry.SLOMultiplier
+		}
+		if entry.TuningEnabled != nil {
+			cfg.TuningEnabled = *entry.TuningEnabled
+		}
+
+		// Populate explicit SLO targets if both are set
+		if entry.TargetTTFT > 0 && entry.TargetITL > 0 {
+			modelKey := queueingmodel.MakeModelKey(namespace, modelID)
+			cfg.SLOTargets = map[string]*queueingmodel.SLOTarget{
+				modelKey: {
+					TargetTTFT: entry.TargetTTFT,
+					TargetITL:  entry.TargetITL,
+				},
+			}
+		}
+		break // only one per-model entry should match
+	}
+
+	return cfg
 }

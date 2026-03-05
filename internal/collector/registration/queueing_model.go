@@ -28,7 +28,7 @@ func RegisterQueueingModelQueries(sourceRegistry *source.SourceRegistry) {
 
 	// Scheduler dispatch rate per endpoint (per-pod arrival rate)
 	// Records successful scheduling attempts with endpoint information.
-	// The metric labels (with llm-d instrumentation) are: status, pod_name, namespace, port
+	// The metric labels (with llm-d instrumentation) are: status, pod_name, namespace
 	// Note: this metric does NOT have a model_name label - it only tracks
 	// which endpoint (pod) the scheduler dispatched to and in which namespace.
 	// We filter for status="success" to get actual dispatched requests.

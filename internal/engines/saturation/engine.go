@@ -123,7 +123,7 @@ func NewEngine(client client.Client, scheme *runtime.Scheme, recorder record.Eve
 		GPULimiter:              gpuLimiter,
 		metricsRegistry:         metricsRegistry,
 		saturationV2Analyzer:    saturation_v2.NewSaturationAnalyzer(capacityStore),
-		queueingModelAnalyzer:  queueingmodel.NewQueueingModelAnalyzer(),
+		queueingModelAnalyzer:   queueingmodel.NewQueueingModelAnalyzer(),
 		capacityStore:           capacityStore,
 		optimizer:               scalingOptimizer,
 	}
@@ -223,11 +223,14 @@ func (e *Engine) optimize(ctx context.Context) error {
 	// Keyed by VariantAutoscaling Namespace/Name
 	currentAllocations := make(map[string]*interfaces.Allocation)
 
-	// Determine which analyzer to use from global config.
-	// Config values:
-	//   "saturation"      → V2 token-based saturation analyzer
-	//   "queueing-model"  → Queueing model-based analyzer (SLO-driven)
-	//   "" (default)      → V1 percentage-based saturation analyzer (legacy)
+	// Determine which analyzer to use.
+	// Priority: queueing model ConfigMap (presence-based) > saturation config analyzerName.
+	// If wva-queueing-model-config exists with a "default" entry, the queueing model
+	// analyzer is active regardless of the saturation config's analyzerName field.
+	qmConfigMap := e.Config.QueueingModelConfig()
+	_, hasQueueingModelConfig := qmConfigMap["default"]
+
+	// Read saturation config for fallback analyzer selection and limiter flag.
 	globalSatCfgMap := e.Config.SaturationConfig()
 	analyzerName := ""
 	enableLimiter := false
@@ -237,9 +240,14 @@ func (e *Engine) optimize(ctx context.Context) error {
 		enableLimiter = cfg.EnableLimiter
 	}
 
+	// Queueing model ConfigMap takes priority over saturation analyzerName.
+	if hasQueueingModelConfig {
+		analyzerName = interfaces.QueueingModelAnalyzerName
+	}
+
 	// Select optimizer based on enableLimiter flag (both are stateless, safe to swap)
 	// Applies to V2 and queueing-model paths which both use the optimizer pipeline.
-	if analyzerName == "saturation" || analyzerName == "queueing-model" {
+	if analyzerName == "saturation" || analyzerName == interfaces.QueueingModelAnalyzerName {
 		if enableLimiter {
 			e.optimizer = pipeline.NewGreedyBySaturationOptimizer()
 		} else {
@@ -253,11 +261,12 @@ func (e *Engine) optimize(ctx context.Context) error {
 	// Each analyzer has a separate optimize path because they use fundamentally
 	// different analysis types and target-building flows:
 	//   - V1: saturation.Analyzer → ModelSaturationAnalysis → CalculateSaturationTargets → Enforcer → Limiter
-	//   - V2: saturation_v2.Analyzer → AnalyzerResult → Optimizer.Optimize → Enforcer bridge
+	//   - V2 (saturation): saturation_v2.Analyzer → AnalyzerResult → Optimizer.Optimize → Enforcer bridge
 	//   - Queueing model: QueueingModelAnalyzer → AnalyzerResult → Optimizer.Optimize → Enforcer bridge
 	// V1 will be deprecated once V2 is fully validated.
+	// Queueing model is activated by presence of wva-queueing-model-config ConfigMap.
 	switch analyzerName {
-	case "queueing-model":
+	case interfaces.QueueingModelAnalyzerName:
 		allDecisions = e.optimizeQueueingModel(ctx, modelGroups, currentAllocations)
 	case "saturation":
 		allDecisions = e.optimizeV2(ctx, modelGroups, currentAllocations)

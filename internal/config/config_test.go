@@ -492,6 +492,71 @@ func TestConfig_MultipleNamespaces(t *testing.T) {
 	assert.Equal(t, 0.80, globalSatConfig2["default"].KvCacheThreshold, "Global config should be unchanged")
 }
 
+func TestQueueingModelConfig_GlobalGetSet(t *testing.T) {
+	cfg := NewTestConfig()
+
+	// Initially empty
+	qmCfg := cfg.QueueingModelConfig()
+	if len(qmCfg) != 0 {
+		t.Fatalf("expected empty queueing model config, got %d entries", len(qmCfg))
+	}
+
+	// Set global config
+	cfg.UpdateQueueingModelConfig(QueueingModelConfigPerModel{
+		"default": interfaces.QueueingModelScalingConfig{SLOMultiplier: 3.0},
+	})
+
+	qmCfg = cfg.QueueingModelConfig()
+	if len(qmCfg) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(qmCfg))
+	}
+	if qmCfg["default"].SLOMultiplier != 3.0 {
+		t.Errorf("SLOMultiplier = %f, want 3.0", qmCfg["default"].SLOMultiplier)
+	}
+}
+
+func TestQueueingModelConfig_NamespaceOverride(t *testing.T) {
+	cfg := NewTestConfig()
+
+	cfg.UpdateQueueingModelConfig(QueueingModelConfigPerModel{
+		"default": interfaces.QueueingModelScalingConfig{SLOMultiplier: 3.0},
+	})
+
+	cfg.UpdateQueueingModelConfigForNamespace("prod", QueueingModelConfigPerModel{
+		"default": interfaces.QueueingModelScalingConfig{SLOMultiplier: 5.0},
+	})
+
+	global := cfg.QueueingModelConfig()
+	if global["default"].SLOMultiplier != 3.0 {
+		t.Errorf("global SLOMultiplier = %f, want 3.0", global["default"].SLOMultiplier)
+	}
+
+	nsCfg := cfg.QueueingModelConfigForNamespace("prod")
+	if nsCfg["default"].SLOMultiplier != 5.0 {
+		t.Errorf("namespace SLOMultiplier = %f, want 5.0", nsCfg["default"].SLOMultiplier)
+	}
+
+	otherCfg := cfg.QueueingModelConfigForNamespace("staging")
+	if otherCfg["default"].SLOMultiplier != 3.0 {
+		t.Errorf("fallback SLOMultiplier = %f, want 3.0", otherCfg["default"].SLOMultiplier)
+	}
+}
+
+func TestQueueingModelConfig_ReturnsCopy(t *testing.T) {
+	cfg := NewTestConfig()
+	cfg.UpdateQueueingModelConfig(QueueingModelConfigPerModel{
+		"default": interfaces.QueueingModelScalingConfig{SLOMultiplier: 3.0},
+	})
+
+	copy1 := cfg.QueueingModelConfig()
+	copy1["default"] = interfaces.QueueingModelScalingConfig{SLOMultiplier: 99.0}
+
+	copy2 := cfg.QueueingModelConfig()
+	if copy2["default"].SLOMultiplier != 3.0 {
+		t.Errorf("stored config was mutated: SLOMultiplier = %f, want 3.0", copy2["default"].SLOMultiplier)
+	}
+}
+
 // Helper function to create bool pointer
 func boolPtr(b bool) *bool {
 	return &b
