@@ -5,17 +5,17 @@ import (
 	"testing"
 )
 
-func TestQueueingModelConfigMapName_Default(t *testing.T) {
+func TestQMAnalyzerConfigMapName_Default(t *testing.T) {
 	os.Unsetenv("QUEUEING_MODEL_CONFIG_MAP_NAME")
-	if got := QueueingModelConfigMapName(); got != "wva-queueing-model-config" {
-		t.Errorf("QueueingModelConfigMapName() = %q, want %q", got, "wva-queueing-model-config")
+	if got := QMAnalyzerConfigMapName(); got != "wva-queueing-model-config" {
+		t.Errorf("QMAnalyzerConfigMapName() = %q, want %q", got, "wva-queueing-model-config")
 	}
 }
 
-func TestQueueingModelConfigMapName_EnvOverride(t *testing.T) {
+func TestQMAnalyzerConfigMapName_EnvOverride(t *testing.T) {
 	os.Setenv("QUEUEING_MODEL_CONFIG_MAP_NAME", "custom-qm-config")
 	defer os.Unsetenv("QUEUEING_MODEL_CONFIG_MAP_NAME")
-	if got := QueueingModelConfigMapName(); got != "custom-qm-config" {
-		t.Errorf("QueueingModelConfigMapName() = %q, want %q", got, "custom-qm-config")
+	if got := QMAnalyzerConfigMapName(); got != "custom-qm-config" {
+		t.Errorf("QMAnalyzerConfigMapName() = %q, want %q", got, "custom-qm-config")
 	}
 }

@@ -51,11 +51,11 @@ func parseSaturationConfig(cmData map[string]string, logger logr.Logger) (config
 	return configs, count
 }
 
-// parseQueueingModelConfig parses queueing model configuration from ConfigMap data.
+// parseQMAnalyzerConfig parses queueing model configuration from ConfigMap data.
 // Returns the parsed configs and count of successfully parsed entries.
 // Invalid or unparseable entries are skipped with an error log.
-func parseQueueingModelConfig(cmData map[string]string, logger logr.Logger) (config.QueueingModelConfigPerModel, int) {
-	configs := make(config.QueueingModelConfigPerModel)
+func parseQMAnalyzerConfig(cmData map[string]string, logger logr.Logger) (config.QMAnalyzerConfigPerModel, int) {
+	configs := make(config.QMAnalyzerConfigPerModel)
 	count := 0
 	for key, yamlStr := range cmData {
 		var qmConfig interfaces.QueueingModelScalingConfig

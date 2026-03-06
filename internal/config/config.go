@@ -22,7 +22,7 @@ type Config struct {
 	//epp            eppConfig
 	features    featureFlagsConfig
 	saturation    saturationConfig    // namespace-aware
-	queueingModel queueingModelConfig // namespace-aware
+	qmAnalyzer qmAnalyzerConfig // namespace-aware
 	scaleToZero   scaleToZeroConfig   // namespace-aware
 
 }
@@ -77,9 +77,9 @@ type featureFlagsConfig struct {
 // for all models. Maps model ID (or "default" key) to its configuration.
 type SaturationScalingConfigPerModel map[string]interfaces.SaturationScalingConfig
 
-// QueueingModelConfigPerModel represents queueing model scaling configuration
+// QMAnalyzerConfigPerModel represents queueing model scaling configuration
 // for all models. Maps model ID (or "default" key) to its configuration.
-type QueueingModelConfigPerModel map[string]interfaces.QueueingModelScalingConfig
+type QMAnalyzerConfigPerModel map[string]interfaces.QueueingModelScalingConfig
 
 // saturationConfig holds saturation scaling configuration (namespace-aware)
 type saturationConfig struct {
@@ -90,13 +90,13 @@ type saturationConfig struct {
 	namespaceConfigs map[string]SaturationScalingConfigPerModel
 }
 
-// queueingModelConfig holds queueing model scaling configuration (namespace-aware)
-type queueingModelConfig struct {
+// qmAnalyzerConfig holds queueing model scaling configuration (namespace-aware)
+type qmAnalyzerConfig struct {
 	// Global default configuration
-	global QueueingModelConfigPerModel
+	global QMAnalyzerConfigPerModel
 
 	// Namespace-local configuration overrides (keyed by namespace name)
-	namespaceConfigs map[string]QueueingModelConfigPerModel
+	namespaceConfigs map[string]QMAnalyzerConfigPerModel
 }
 
 // scaleToZeroConfig holds scale-to-zero configuration (namespace-aware)
@@ -493,30 +493,30 @@ func (c *Config) UpdateScaleToZeroConfigForNamespace(namespace string, config Sc
 
 }
 
-// QueueingModelConfig returns the current global queueing model scaling configuration.
+// QMAnalyzerConfig returns the current global queueing model scaling configuration.
 // Thread-safe. Returns a copy to prevent external modifications.
-// For namespace-aware lookups, use QueueingModelConfigForNamespace instead.
-func (c *Config) QueueingModelConfig() map[string]interfaces.QueueingModelScalingConfig {
-	return c.QueueingModelConfigForNamespace("")
+// For namespace-aware lookups, use QMAnalyzerConfigForNamespace instead.
+func (c *Config) QMAnalyzerConfig() map[string]interfaces.QueueingModelScalingConfig {
+	return c.QMAnalyzerConfigForNamespace("")
 }
 
-// QueueingModelConfigForNamespace returns the queueing model scaling configuration for the given namespace.
+// QMAnalyzerConfigForNamespace returns the queueing model scaling configuration for the given namespace.
 // Resolution order: namespace-local > global
 // Thread-safe. Returns a copy to prevent external modifications.
 // If namespace is empty, returns global config.
-func (c *Config) QueueingModelConfigForNamespace(namespace string) map[string]interfaces.QueueingModelScalingConfig {
+func (c *Config) QMAnalyzerConfigForNamespace(namespace string) map[string]interfaces.QueueingModelScalingConfig {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	sourceConfig := c.resolveQueueingModelConfig(namespace)
-	return copyQueueingModelConfig(sourceConfig)
+	sourceConfig := c.resolveQMAnalyzerConfig(namespace)
+	return copyQMAnalyzerConfig(sourceConfig)
 }
 
-// resolveQueueingModelConfig resolves queueing model config for a namespace (namespace-local > global).
+// resolveQMAnalyzerConfig resolves queueing model config for a namespace (namespace-local > global).
 // Must be called while holding at least a read lock.
-func (c *Config) resolveQueueingModelConfig(namespace string) map[string]interfaces.QueueingModelScalingConfig {
+func (c *Config) resolveQMAnalyzerConfig(namespace string) map[string]interfaces.QueueingModelScalingConfig {
 	// Check namespace-local first (if namespace is provided)
 	if namespace != "" {
-		if nsConfig, exists := c.queueingModel.namespaceConfigs[namespace]; exists {
+		if nsConfig, exists := c.qmAnalyzer.namespaceConfigs[namespace]; exists {
 			if len(nsConfig) > 0 {
 				return nsConfig
 			}
@@ -524,15 +524,15 @@ func (c *Config) resolveQueueingModelConfig(namespace string) map[string]interfa
 	}
 
 	// Fall back to global
-	if len(c.queueingModel.global) > 0 {
-		return c.queueingModel.global
+	if len(c.qmAnalyzer.global) > 0 {
+		return c.qmAnalyzer.global
 	}
 
 	return nil
 }
 
-// copyQueueingModelConfig creates a deep copy of the queueing model config map.
-func copyQueueingModelConfig(src map[string]interfaces.QueueingModelScalingConfig) map[string]interfaces.QueueingModelScalingConfig {
+// copyQMAnalyzerConfig creates a deep copy of the queueing model config map.
+func copyQMAnalyzerConfig(src map[string]interfaces.QueueingModelScalingConfig) map[string]interfaces.QueueingModelScalingConfig {
 	if src == nil {
 		return make(map[string]interfaces.QueueingModelScalingConfig)
 	}
@@ -543,17 +543,17 @@ func copyQueueingModelConfig(src map[string]interfaces.QueueingModelScalingConfi
 	return result
 }
 
-// UpdateQueueingModelConfig updates the global queueing model scaling configuration.
+// UpdateQMAnalyzerConfig updates the global queueing model scaling configuration.
 // Thread-safe. Takes a copy of the provided map to prevent external modifications.
-// For namespace-local updates, use UpdateQueueingModelConfigForNamespace instead.
-func (c *Config) UpdateQueueingModelConfig(config map[string]interfaces.QueueingModelScalingConfig) {
-	c.UpdateQueueingModelConfigForNamespace("", config)
+// For namespace-local updates, use UpdateQMAnalyzerConfigForNamespace instead.
+func (c *Config) UpdateQMAnalyzerConfig(config map[string]interfaces.QueueingModelScalingConfig) {
+	c.UpdateQMAnalyzerConfigForNamespace("", config)
 }
 
-// UpdateQueueingModelConfigForNamespace updates the queueing model scaling configuration for the given namespace.
+// UpdateQMAnalyzerConfigForNamespace updates the queueing model scaling configuration for the given namespace.
 // If namespace is empty, updates global config.
 // Thread-safe. Takes a copy of the provided map to prevent external modifications.
-func (c *Config) UpdateQueueingModelConfigForNamespace(namespace string, config map[string]interfaces.QueueingModelScalingConfig) {
+func (c *Config) UpdateQMAnalyzerConfigForNamespace(namespace string, config map[string]interfaces.QueueingModelScalingConfig) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -564,20 +564,20 @@ func (c *Config) UpdateQueueingModelConfigForNamespace(namespace string, config 
 	var oldCount int
 	if namespace == "" {
 		// Update global
-		oldCount = len(c.queueingModel.global)
-		c.queueingModel.global = newConfig
-		newCount := len(c.queueingModel.global)
+		oldCount = len(c.qmAnalyzer.global)
+		c.qmAnalyzer.global = newConfig
+		newCount := len(c.qmAnalyzer.global)
 		if oldCount != newCount {
 			ctrl.Log.Info("Updated global queueing model config", "oldEntries", oldCount, "newEntries", newCount)
 		}
 	} else {
 		// Update namespace-local
-		if c.queueingModel.namespaceConfigs == nil {
-			c.queueingModel.namespaceConfigs = make(map[string]QueueingModelConfigPerModel)
+		if c.qmAnalyzer.namespaceConfigs == nil {
+			c.qmAnalyzer.namespaceConfigs = make(map[string]QMAnalyzerConfigPerModel)
 		}
-		oldCount = len(c.queueingModel.namespaceConfigs[namespace])
-		c.queueingModel.namespaceConfigs[namespace] = newConfig
-		newCount := len(c.queueingModel.namespaceConfigs[namespace])
+		oldCount = len(c.qmAnalyzer.namespaceConfigs[namespace])
+		c.qmAnalyzer.namespaceConfigs[namespace] = newConfig
+		newCount := len(c.qmAnalyzer.namespaceConfigs[namespace])
 		if oldCount != newCount {
 			ctrl.Log.Info("Updated namespace-local queueing model config", "namespace", namespace, "oldEntries", oldCount, "newEntries", newCount)
 		}
@@ -600,9 +600,9 @@ func (c *Config) RemoveNamespaceConfig(namespace string) {
 			removed = true
 		}
 	}
-	if c.queueingModel.namespaceConfigs != nil {
-		if _, exists := c.queueingModel.namespaceConfigs[namespace]; exists {
-			delete(c.queueingModel.namespaceConfigs, namespace)
+	if c.qmAnalyzer.namespaceConfigs != nil {
+		if _, exists := c.qmAnalyzer.namespaceConfigs[namespace]; exists {
+			delete(c.qmAnalyzer.namespaceConfigs, namespace)
 			removed = true
 		}
 	}
@@ -668,9 +668,9 @@ func NewTestConfig() *Config {
 			global:           make(SaturationScalingConfigPerModel),
 			namespaceConfigs: make(map[string]SaturationScalingConfigPerModel),
 		},
-		queueingModel: queueingModelConfig{
-			global:           make(QueueingModelConfigPerModel),
-			namespaceConfigs: make(map[string]QueueingModelConfigPerModel),
+		qmAnalyzer: qmAnalyzerConfig{
+			global:           make(QMAnalyzerConfigPerModel),
+			namespaceConfigs: make(map[string]QMAnalyzerConfigPerModel),
 		},
 		scaleToZero: scaleToZeroConfig{
 			global:           make(ScaleToZeroConfigData),

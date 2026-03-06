@@ -57,7 +57,7 @@ func (e *Engine) optimizeQueueingModel(
 			continue
 		}
 
-		qmConfigMap := e.Config.QueueingModelConfigForNamespace(namespace)
+		qmConfigMap := e.Config.QMAnalyzerConfigForNamespace(namespace)
 		qConfig := buildQueueingModelConfig(qmConfigMap, namespace, modelID)
 
 		result, err := e.runQueueingModelAnalysis(ctx, modelID, namespace,

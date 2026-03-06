@@ -227,8 +227,8 @@ func (e *Engine) optimize(ctx context.Context) error {
 	// Priority: queueing model ConfigMap (presence-based) > saturation config analyzerName.
 	// If wva-queueing-model-config exists with a "default" entry, the queueing model
 	// analyzer is active regardless of the saturation config's analyzerName field.
-	qmConfigMap := e.Config.QueueingModelConfig()
-	_, hasQueueingModelConfig := qmConfigMap["default"]
+	qmConfigMap := e.Config.QMAnalyzerConfig()
+	_, hasQMAnalyzerConfig := qmConfigMap["default"]
 
 	// Read saturation config for fallback analyzer selection and limiter flag.
 	globalSatCfgMap := e.Config.SaturationConfig()
@@ -241,7 +241,7 @@ func (e *Engine) optimize(ctx context.Context) error {
 	}
 
 	// Queueing model ConfigMap takes priority over saturation analyzerName.
-	if hasQueueingModelConfig {
+	if hasQMAnalyzerConfig {
 		analyzerName = interfaces.QueueingModelAnalyzerName
 	}
 
