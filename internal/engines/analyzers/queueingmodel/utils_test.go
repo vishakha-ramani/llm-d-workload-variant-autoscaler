@@ -174,8 +174,8 @@ func TestMakeVariantKey(t *testing.T) {
 
 func TestStateVectorToParams(t *testing.T) {
 	tests := []struct {
-		name                       string
-		v                          []float64
+		name                           string
+		v                              []float64
 		wantAlpha, wantBeta, wantGamma float64
 	}{
 		{
@@ -223,8 +223,8 @@ func TestStateVectorToParams(t *testing.T) {
 
 func TestParamsToStateVector(t *testing.T) {
 	tests := []struct {
-		name                       string
-		alpha, beta, gamma         float64
+		name               string
+		alpha, beta, gamma float64
 	}{
 		{"zeros", 0, 0, 0},
 		{"positive values", 1.1, 2.2, 3.3},

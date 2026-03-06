@@ -21,9 +21,9 @@ type Config struct {
 	prometheus     prometheusConfig
 	//epp            eppConfig
 	features    featureFlagsConfig
-	saturation    saturationConfig    // namespace-aware
-	qmAnalyzer qmAnalyzerConfig // namespace-aware
-	scaleToZero   scaleToZeroConfig   // namespace-aware
+	saturation  saturationConfig  // namespace-aware
+	qmAnalyzer  qmAnalyzerConfig  // namespace-aware
+	scaleToZero scaleToZeroConfig // namespace-aware
 
 }
 
