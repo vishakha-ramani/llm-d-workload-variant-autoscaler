@@ -185,32 +185,30 @@ func (a *QueueingModelAnalyzer) guessSLOFromMetrics(
 ) *SLOTarget {
 	logger := ctrl.LoggerFrom(ctx)
 
+	// Aggregate workload characteristics
 	wm := aggregateWorkloadMetrics(metrics)
 	if wm == nil {
 		return nil
 	}
 
-	// Get the SLO multiplier k
+	// Get the SLO multiplier (default if not configured)
 	k := config.SLOMultiplier
 	if k <= 1.0 {
 		k = DefaultSLOMultiplier
 	}
 
-	// Try theory-based SLO: find a variant with learned parameters
+	// Try theory-based SLO: take the max of SLO targets over variants with learned parameters
+	var SLOTargetForModel *SLOTarget
 	variantMetrics := groupMetricsByVariant(metrics)
 	for variantName := range variantMetrics {
 		params := a.getParams(modelID, namespace, variantName)
-		if params == nil {
+		if params == nil || params.Alpha <= 0 || params.Beta <= 0 || params.Gamma <= 0 {
 			continue
 		}
 
 		alpha := float64(params.Alpha)
 		beta := float64(params.Beta)
 		gamma := float64(params.Gamma)
-
-		if alpha <= 0 || beta <= 0 || gamma <= 0 {
-			continue
-		}
 
 		// T_iter at SLO utilization: k × α = α/(1-ρ) where ρ = 1-1/k
 		tIterSLO := k * alpha
@@ -232,15 +230,24 @@ func (a *QueueingModelAnalyzer) guessSLOFromMetrics(
 			"TargetITL_ms", itlSLO,
 		)
 
-		return &SLOTarget{
+		SLOTargetForVariant := &SLOTarget{
 			TargetTTFT: float32(ttftSLO),
 			TargetITL:  float32(itlSLO),
 		}
+
+		if SLOTargetForModel == nil {
+			SLOTargetForModel = SLOTargetForVariant
+		} else {
+			SLOTargetForVariant.Max(SLOTargetForVariant)
+		}
 	}
 
-	// Fallback: use observed latencies with headroom when learned params
-	// are not yet available (cold start / early tuning cycles)
-	return fallbackSLOFromObservations(ctx, wm)
+	// Fallback: use observed latencies with headroom if none of the variants have
+	// learned parameters (e.g. cold start / early tuning cycles)
+	if SLOTargetForModel == nil {
+		return fallbackSLOFromObservations(ctx, wm)
+	}
+	return SLOTargetForModel
 }
 
 func (a *QueueingModelAnalyzer) updateVariantParameters(
@@ -580,30 +587,30 @@ type workloadMetrics struct {
 // aggregateWorkloadMetrics averages token sizes and latencies across replicas
 // that have active traffic. Returns nil if no replicas have traffic.
 func aggregateWorkloadMetrics(metrics []interfaces.ReplicaMetrics) *workloadMetrics {
+	var totalArrivalRate float64
 	var totalInputToks, totalOutputToks float64
 	var totalTTFT, totalITL float64
-	validPods := 0
 
 	for _, rm := range metrics {
 		if rm.ArrivalRate <= 0 {
 			continue
 		}
-		totalInputToks += rm.AvgInputTokens
-		totalOutputToks += rm.AvgOutputTokens
-		totalTTFT += rm.AvgTTFT
-		totalITL += rm.AvgITL
-		validPods++
+		totalArrivalRate += rm.ArrivalRate
+		totalInputToks += rm.ArrivalRate * rm.AvgInputTokens
+		totalOutputToks += rm.ArrivalRate * rm.AvgOutputTokens
+		totalTTFT += rm.ArrivalRate * rm.AvgTTFT
+		totalITL += rm.ArrivalRate * rm.AvgITL
 	}
 
-	if validPods == 0 {
+	if totalArrivalRate == 0 {
 		return nil
 	}
 
 	return &workloadMetrics{
-		avgInputTokens:  totalInputToks / float64(validPods),
-		avgOutputTokens: totalOutputToks / float64(validPods),
-		avgTTFT:         totalTTFT / float64(validPods),
-		avgITL:          totalITL / float64(validPods),
+		avgInputTokens:  totalInputToks / totalArrivalRate,
+		avgOutputTokens: totalOutputToks / totalArrivalRate,
+		avgTTFT:         totalTTFT / totalArrivalRate,
+		avgITL:          totalITL / totalArrivalRate,
 	}
 }
 

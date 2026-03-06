@@ -49,3 +49,11 @@ func (c *QMConfig) GetSLOForModel(namespace, modelID string) *SLOTarget {
 	key := MakeModelKey(namespace, modelID)
 	return c.SLOTargets[key]
 }
+
+// make an SLOTarget the maximum of itself and other target
+func (t *SLOTarget) Max(other *SLOTarget) {
+	if other != nil {
+		t.TargetITL = max(t.TargetITL, other.TargetITL)
+		t.TargetTTFT = max(t.TargetTTFT, other.TargetTTFT)
+	}
+}
