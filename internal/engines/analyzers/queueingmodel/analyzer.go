@@ -97,9 +97,9 @@ func (a *QueueingModelAnalyzer) Analyze(
 	namespace := input.Namespace
 
 	// Extract config
-	qConfig, ok := input.Config.(*QueueingModelConfig)
+	qConfig, ok := input.Config.(*QMConfig)
 	if !ok {
-		return nil, fmt.Errorf("expected *QueueingModelConfig, got %T", input.Config)
+		return nil, fmt.Errorf("expected *QMConfig, got %T", input.Config)
 	}
 
 	// Update parameters (tuner) for all variants associated with the model
@@ -148,7 +148,7 @@ func (a *QueueingModelAnalyzer) getSLOTarget(
 	ctx context.Context,
 	namespace string,
 	modelID string,
-	config *QueueingModelConfig,
+	config *QMConfig,
 	metrics []interfaces.ReplicaMetrics,
 ) *SLOTarget {
 	// First try explicit config
@@ -180,7 +180,7 @@ func (a *QueueingModelAnalyzer) guessSLOFromMetrics(
 	ctx context.Context,
 	namespace string,
 	modelID string,
-	config *QueueingModelConfig,
+	config *QMConfig,
 	metrics []interfaces.ReplicaMetrics,
 ) *SLOTarget {
 	logger := ctrl.LoggerFrom(ctx)
@@ -248,7 +248,7 @@ func (a *QueueingModelAnalyzer) updateVariantParameters(
 	namespace string,
 	modelID string,
 	metrics []interfaces.ReplicaMetrics,
-	config *QueueingModelConfig,
+	config *QMConfig,
 ) {
 	logger := ctrl.LoggerFrom(ctx)
 

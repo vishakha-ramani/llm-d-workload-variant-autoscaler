@@ -58,7 +58,7 @@ func (e *Engine) optimizeQueueingModel(
 		}
 
 		qmConfigMap := e.Config.QMAnalyzerConfigForNamespace(namespace)
-		qConfig := buildQueueingModelConfig(qmConfigMap, namespace, modelID)
+		qConfig := buildQMConfig(qmConfigMap, namespace, modelID)
 
 		result, err := e.runQueueingModelAnalysis(ctx, modelID, namespace,
 			data.replicaMetrics, qConfig, data.variantStates)
@@ -111,7 +111,7 @@ func (e *Engine) runQueueingModelAnalysis(
 	ctx context.Context,
 	modelID, namespace string,
 	replicaMetrics []interfaces.ReplicaMetrics,
-	config *queueingmodel.QueueingModelConfig,
+	config *queueingmodel.QMConfig,
 	variantStates []interfaces.VariantReplicaState,
 ) (*interfaces.AnalyzerResult, error) {
 	logger := ctrl.LoggerFrom(ctx)
@@ -140,16 +140,16 @@ func (e *Engine) runQueueingModelAnalysis(
 	return result, nil
 }
 
-// buildQueueingModelConfig creates a QueueingModelConfig for a specific model.
+// buildQMConfig creates a QMConfig for a specific model.
 // It starts from the "default" entry in allConfigs, then applies any per-model
 // override whose ModelID and Namespace match. Per-model entries can override
 // sloMultiplier, tuningEnabled, and provide explicit SLO targets (targetTTFT/targetITL).
 // Falls back to defaults when fields are zero/nil.
-func buildQueueingModelConfig(
+func buildQMConfig(
 	allConfigs map[string]interfaces.QueueingModelScalingConfig,
 	namespace, modelID string,
-) *queueingmodel.QueueingModelConfig {
-	cfg := &queueingmodel.QueueingModelConfig{
+) *queueingmodel.QMConfig {
+	cfg := &queueingmodel.QMConfig{
 		TuningEnabled: true,
 		SLOMultiplier: queueingmodel.DefaultSLOMultiplier,
 	}

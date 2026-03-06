@@ -5,8 +5,8 @@ import (
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/interfaces"
 )
 
-// QueueingModelConfig implements interfaces.AnalyzerConfig
-type QueueingModelConfig struct {
+// QMConfig implements interfaces.AnalyzerConfig
+type QMConfig struct {
 	// SLOTargets maps (modelID, namespace) to SLO targets
 	// Key format: "namespace/modelID"
 	SLOTargets map[string]*SLOTarget
@@ -37,12 +37,12 @@ type SLOTarget struct {
 }
 
 // GetAnalyzerName implements interfaces.AnalyzerConfig
-func (c *QueueingModelConfig) GetAnalyzerName() string {
+func (c *QMConfig) GetAnalyzerName() string {
 	return interfaces.QueueingModelAnalyzerName
 }
 
 // GetSLOForModel retrieves SLO targets for a model in a namespace
-func (c *QueueingModelConfig) GetSLOForModel(namespace, modelID string) *SLOTarget {
+func (c *QMConfig) GetSLOForModel(namespace, modelID string) *SLOTarget {
 	if c.SLOTargets == nil {
 		return nil
 	}
