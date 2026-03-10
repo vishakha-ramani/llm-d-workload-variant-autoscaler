@@ -279,7 +279,7 @@ func cleanupTestResources(ctx context.Context, k8sClient *kubernetes.Clientset, 
 
 	// Helper function to check if resource name matches test patterns
 	isTestResource := func(name string) bool {
-		return strings.HasPrefix(name, "test-") || strings.HasPrefix(name, "smoke-") || strings.HasPrefix(name, "saturation-") || strings.HasPrefix(name, "error-test-") || strings.HasPrefix(name, "target-condition-")
+		return strings.HasPrefix(name, "test-") || strings.HasPrefix(name, "smoke-") || strings.HasPrefix(name, "saturation-") || strings.HasPrefix(name, "error-test-") || strings.HasPrefix(name, "target-condition-") || strings.HasPrefix(name, "scale-from-zero-")
 	}
 
 	// List and delete test VAs

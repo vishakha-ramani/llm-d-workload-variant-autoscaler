@@ -63,7 +63,6 @@ LLM_D_INFERENCE_SCHEDULER_IMG=${LLM_D_INFERENCE_SCHEDULER_IMG:-"ghcr.io/llm-d/ll
 
 # Gateway Configuration
 GATEWAY_PROVIDER=${GATEWAY_PROVIDER:-"istio"} # Options: kgateway, istio
-BENCHMARK_MODE=${BENCHMARK_MODE:-"false"} # if true, updates to Istio config for benchmark (istioBench env required in helmfile)
 # Save original value to detect if explicitly set via environment variable
 INSTALL_GATEWAY_CTRLPLANE_ORIGINAL="${INSTALL_GATEWAY_CTRLPLANE:-}"
 INSTALL_GATEWAY_CTRLPLANE="${INSTALL_GATEWAY_CTRLPLANE:-false}"
@@ -503,6 +502,18 @@ set_wva_logging_level() {
     echo ""
 }
 
+# Detect which InferencePool API group is in use in the cluster (v1 vs v1alpha2).
+# Sets DETECTED_POOL_GROUP to inference.networking.k8s.io or inference.networking.x-k8s.io
+# so WVA can be upgraded to watch the correct group (required for scale-from-zero datastore).
+detect_inference_pool_api_group() {
+    DETECTED_POOL_GROUP=""
+    if [ -n "$(kubectl get inferencepools.inference.networking.k8s.io -A -o name --request-timeout=10s 2>/dev/null | head -1)" ]; then
+        DETECTED_POOL_GROUP="inference.networking.k8s.io"
+    elif [ -n "$(kubectl get inferencepools.inference.networking.x-k8s.io -A -o name --request-timeout=10s 2>/dev/null | head -1)" ]; then
+        DETECTED_POOL_GROUP="inference.networking.x-k8s.io"
+    fi
+}
+
 deploy_wva_controller() {
     log_info "Deploying Workload-Variant-Autoscaler..."
     log_info "Using image: $WVA_IMAGE_REPO:$WVA_IMAGE_TAG"
@@ -545,6 +556,7 @@ deploy_wva_controller() {
         --set wva.namespaceScoped=$NAMESPACE_SCOPED \
         --set wva.metrics.secure=$WVA_METRICS_SECURE \
         ${CONTROLLER_INSTANCE:+--set wva.controllerInstance=$CONTROLLER_INSTANCE} \
+        ${POOL_GROUP:+--set wva.poolGroup=$POOL_GROUP} \
         ${KV_SPARE_TRIGGER:+--set wva.capacityScaling.default.kvSpareTrigger=$KV_SPARE_TRIGGER} \
         ${QUEUE_SPARE_TRIGGER:+--set wva.capacityScaling.default.queueSpareTrigger=$QUEUE_SPARE_TRIGGER}
 
@@ -982,9 +994,9 @@ deploy_llm_d_infrastructure() {
         fi
     fi
 
-    # Patch llm-d-inference-scheduler deployment if scale-to-zero is enabled
-    if [ "$ENABLE_SCALE_TO_ZERO" == "true" ]; then
-        # Patch llm-d-inference-scheduler to enable flowcontrol and use new image
+    # Patch llm-d-inference-scheduler deployment to enable GIE flow control when scale-to-zero
+    # or e2e tests are enabled (required for scale-from-zero: queue metrics and queuing behavior).
+    if [ "$ENABLE_SCALE_TO_ZERO" == "true" ] || [ "$E2E_TESTS_ENABLED" == "true" ]; then
         log_info "Patching llm-d-inference-scheduler deployment to enable flowcontrol and use a new image"
         if kubectl get deployment "$LLM_D_EPP_NAME" -n "$LLMD_NS" &> /dev/null; then
             kubectl patch deployment "$LLM_D_EPP_NAME" -n "$LLMD_NS" --type='json' -p='[
@@ -1003,13 +1015,52 @@ deploy_llm_d_infrastructure() {
                 }
             ]'
         else
-            log_warning "Skipping inference-scheduler patch for SCALE_TO_ZERO: Deployment $LLM_D_EPP_NAME not found in $LLMD_NS"
+            log_warning "Skipping inference-scheduler patch: Deployment $LLM_D_EPP_NAME not found in $LLMD_NS"
+        fi
+    fi
+
+    # Deploy InferenceObjective for GIE queuing when flow control is enabled (scale-from-zero / e2e).
+    # Enables gateway-level queuing so inference_extension_flow_control_queue_size is populated.
+    if [ "$ENABLE_SCALE_TO_ZERO" == "true" ] || [ "$E2E_TESTS_ENABLED" == "true" ]; then
+        if kubectl get crd inferenceobjectives.inference.networking.x-k8s.io &>/dev/null; then
+            local infobj_file="${WVA_PROJECT}/deploy/inference-objective-e2e.yaml"
+            if [ -f "$infobj_file" ]; then
+                local pool_ref_name="${RELEASE_NAME_POSTFIX:+gaie-$RELEASE_NAME_POSTFIX}"
+                pool_ref_name="${pool_ref_name:-gaie-$WELL_LIT_PATH_NAME}"
+                log_info "Applying InferenceObjective e2e-default (poolRef.name=$pool_ref_name) for GIE queuing"
+                if sed -e "s/NAMESPACE_PLACEHOLDER/${LLMD_NS}/g" -e "s/POOL_NAME_PLACEHOLDER/${pool_ref_name}/g" "$infobj_file" | kubectl apply -f -; then
+                    log_success "InferenceObjective e2e-default applied"
+                else
+                    log_warning "Failed to apply InferenceObjective (pool $pool_ref_name may not exist yet)"
+                fi
+            else
+                log_warning "InferenceObjective manifest not found at $infobj_file"
+            fi
+        else
+            log_warning "InferenceObjective CRD not found; GIE may not support InferenceObjective yet"
         fi
     fi
 
     log_info "Waiting for llm-d components to initialize..."
     kubectl wait --for=condition=Available deployment --all -n $LLMD_NS --timeout=60s || \
         log_warning "llm-d components are not ready yet - check 'kubectl get pods -n $LLMD_NS'"
+
+    # Align WVA with the InferencePool API group in use (scale-from-zero requires WVA to watch the same group).
+    # llm-d version determines whether pools are inference.networking.k8s.io (v1) or inference.networking.x-k8s.io (v1alpha2).
+    if [ "$DEPLOY_WVA" == "true" ]; then
+        detect_inference_pool_api_group
+        if [ -n "$DETECTED_POOL_GROUP" ]; then
+            log_info "Detected InferencePool API group: $DETECTED_POOL_GROUP; upgrading WVA to watch it (scale-from-zero)"
+            if helm upgrade "$WVA_RELEASE_NAME" ${WVA_PROJECT}/charts/workload-variant-autoscaler \
+                -n $WVA_NS --reuse-values --set wva.poolGroup=$DETECTED_POOL_GROUP --wait --timeout=60s; then
+                log_success "WVA upgraded with wva.poolGroup=$DETECTED_POOL_GROUP"
+            else
+                log_warning "WVA upgrade with poolGroup failed - scale-from-zero may not see the InferencePool"
+            fi
+        else
+            log_warning "Could not detect InferencePool API group - WVA may have empty datastore for scale-from-zero"
+        fi
+    fi
 
     # Deploy second model infrastructure for multi-model testing (limiter e2e tests)
     if [ "$MULTI_MODEL_TESTING" == "true" ]; then
