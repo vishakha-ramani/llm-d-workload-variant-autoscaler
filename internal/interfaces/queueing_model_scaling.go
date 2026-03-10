@@ -25,7 +25,7 @@ type QueueingModelScalingConfig struct {
 	// where rho is the fraction of server capacity consumed by arrivals.
 	// It then follows that k must be > 1.0 (k=1 means rho=0, no load tolerance; k<=1 is physically
 	// meaningless in the queueing model).
-	// Also note that SLOMultiplier filed set to value 0 value means use default (3.0).
+	// Also note that SLOMultiplier set to value 0 value means use default (3.0).
 	SLOMultiplier float64 `yaml:"sloMultiplier,omitempty"`
 
 	// TuningEnabled enables online parameter learning via Kalman filter.

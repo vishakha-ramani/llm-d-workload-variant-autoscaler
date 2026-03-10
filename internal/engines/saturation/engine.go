@@ -701,6 +701,7 @@ type modelData struct {
 
 // prepareModelData collects metrics and builds lookup maps for a model's VAs.
 // This is shared by both V1 and V2 paths.
+// Also shared by the Queueing Model Analyzer engine.
 // Returns nil modelData (not error) when no metrics are available — caller should skip the model.
 func (e *Engine) prepareModelData(
 	ctx context.Context,

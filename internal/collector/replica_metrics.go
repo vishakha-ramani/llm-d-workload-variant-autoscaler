@@ -311,8 +311,15 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 	if result := results[registration.QuerySchedulerDispatchRate]; result != nil {
 		if !result.HasError() {
 			for _, value := range result.Values {
-				podName := value.Labels["pod_name"]
+				podName := value.Labels["pod"]
 				if podName == "" {
+					podName = value.Labels["pod_name"]
+				}
+				if podName == "" {
+					logger.Info("Scheduler dispatch rate metric missing both 'pod' and 'pod_name' labels, skipping",
+						"labels", value.Labels,
+						"model", modelID,
+						"namespace", namespace)
 					continue
 				}
 
@@ -478,6 +485,10 @@ func (c *ReplicaMetricsCollector) CollectReplicaMetrics(
 			if mbs, ok := deployMaxBatchSize[deployKey]; ok {
 				maxBatchSize = mbs
 			}
+		}
+
+		if (data.hasKv || data.hasQueue) && !data.hasArrivalRate {
+			logger.Info("Pod has vLLM metrics but no dispatch rate — possible pod/pod_name label mismatch", "pod", podName, "model", modelID, "namespace", namespace)
 		}
 
 		metric := interfaces.ReplicaMetrics{
