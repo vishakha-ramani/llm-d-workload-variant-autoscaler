@@ -96,28 +96,32 @@ func (a *QueueingModelAnalyzer) Analyze(
 	modelID := input.ModelID
 	namespace := input.Namespace
 
-	// Extract config
+	// Extract configuration
 	qConfig, ok := input.Config.(*QMConfig)
 	if !ok {
 		return nil, fmt.Errorf("expected *QMConfig, got %T", input.Config)
 	}
 
+	// Get variant names and group metrics by variant
+	variantNames := getVariantNames(input.ReplicaMetrics)
+	variantMetrics := groupMetricsByVariant(input.ReplicaMetrics)
+
 	// Update parameters (tuner) for all variants associated with the model
 	if qConfig.TuningEnabled {
-		a.updateVariantParameters(ctx, namespace, modelID, input.ReplicaMetrics, qConfig)
+		a.updateVariantParameters(ctx, namespace, modelID, variantNames, variantMetrics, qConfig)
 	}
 
 	// Get SLO targets
 	// TODO: store the time series for SLO and smooth the SLO target.
-	sloTarget := a.getSLOTarget(ctx, namespace, modelID, qConfig, input.ReplicaMetrics)
+	sloTarget := a.getSLOTarget(ctx, namespace, modelID, qConfig, variantNames, input.ReplicaMetrics)
 	if sloTarget == nil {
 		logger.Info("No SLO targets", "modelID", modelID)
-		return a.emptyResult(input), nil
+		return nil, fmt.Errorf("failed to analyze variants due to lack of SLO targets for model %q", modelID)
 	}
 
 	// Compute capacities
 	variantCapacities := a.computeAllVariantCapacities(
-		ctx, namespace, modelID, input.ReplicaMetrics, input.VariantStates, sloTarget,
+		ctx, namespace, modelID, variantMetrics, input.VariantStates, sloTarget,
 	)
 	if len(variantCapacities) == 0 {
 		return nil, fmt.Errorf("could not compute variant capacities for model %q", modelID)
@@ -144,129 +148,28 @@ func (a *QueueingModelAnalyzer) Analyze(
 	}, nil
 }
 
-func (a *QueueingModelAnalyzer) getSLOTarget(
-	ctx context.Context,
-	namespace string,
-	modelID string,
-	config *QMConfig,
-	metrics []interfaces.ReplicaMetrics,
-) *SLOTarget {
-	// First try explicit config
-	if slo := config.GetSLOForModel(namespace, modelID); slo != nil {
-		return slo
-	}
-	// Infer SLO from the queueing model and observed metrics
-	return a.guessSLOFromMetrics(ctx, namespace, modelID, config, metrics)
-}
-
-// guessSLOFromMetrics infers SLO targets from the queueing model when no
-// explicit SLO configuration is provided.
-//
-// The SLO is defined using the idle-latency multiplier approach: the queueing
-// delay (T_iter) is allowed to inflate by a fixed multiplier k relative to the
-// idle baseline α, while deterministic work components remain at their true cost.
-//
-// Formulas (all values in milliseconds):
-//
-//	TargetTTFT = k×α + (β+γ)×i_l
-//	TargetITL  = k×α + β + γ×(i_l + (o_l+1)/2)
-//
-// This gives exact utilization correspondence: ρ = 1 - 1/k.
-// k is a fixed constant (not dependent on system state) because SLOs are contracts.
-//
-// When learned parameters are unavailable, falls back to observed latencies
-// with a headroom multiplier, capped at reasonable maximums.
-func (a *QueueingModelAnalyzer) guessSLOFromMetrics(
-	ctx context.Context,
-	namespace string,
-	modelID string,
-	config *QMConfig,
-	metrics []interfaces.ReplicaMetrics,
-) *SLOTarget {
-	logger := ctrl.LoggerFrom(ctx)
-
-	// Aggregate workload characteristics
-	wm := aggregateWorkloadMetrics(metrics)
-	if wm == nil {
-		return nil
-	}
-
-	// Get the SLO multiplier (default if not configured)
-	k := config.SLOMultiplier
-	if k <= 1.0 {
-		k = DefaultSLOMultiplier
-	}
-
-	// Try theory-based SLO: take the max of SLO targets over variants with learned parameters
-	var SLOTargetForModel *SLOTarget
-	variantMetrics := groupMetricsByVariant(metrics)
-	for variantName := range variantMetrics {
-		params := a.getParams(modelID, namespace, variantName)
-		if params == nil || params.Alpha <= 0 || params.Beta <= 0 || params.Gamma <= 0 {
-			continue
-		}
-
-		alpha := float64(params.Alpha)
-		beta := float64(params.Beta)
-		gamma := float64(params.Gamma)
-
-		// T_iter at SLO utilization: k × α = α/(1-ρ) where ρ = 1-1/k
-		tIterSLO := k * alpha
-
-		// Deterministic work — NOT inflated by k
-		prefillWork := (beta + gamma) * wm.avgInputTokens
-		decodeWork := beta + gamma*(wm.avgInputTokens+(wm.avgOutputTokens+1.0)/2.0)
-
-		ttftSLO := tIterSLO + prefillWork
-		itlSLO := tIterSLO + decodeWork
-
-		logger.V(1).Info("Inferred SLO from queueing model",
-			"variant", variantName,
-			"k", k,
-			"alpha", alpha, "beta", beta, "gamma", gamma,
-			"avgInputTokens", wm.avgInputTokens,
-			"avgOutputTokens", wm.avgOutputTokens,
-			"TargetTTFT_ms", ttftSLO,
-			"TargetITL_ms", itlSLO,
-		)
-
-		SLOTargetForVariant := &SLOTarget{
-			TargetTTFT: float32(ttftSLO),
-			TargetITL:  float32(itlSLO),
-		}
-
-		if SLOTargetForModel == nil {
-			SLOTargetForModel = SLOTargetForVariant
-		} else {
-			SLOTargetForVariant.Max(SLOTargetForVariant)
-		}
-	}
-
-	// Fallback: use observed latencies with headroom if none of the variants have
-	// learned parameters (e.g. cold start / early tuning cycles)
-	if SLOTargetForModel == nil {
-		return fallbackSLOFromObservations(ctx, wm)
-	}
-	return SLOTargetForModel
-}
-
+// updateVariantParameters runs the model tuner and updates the parameters in the store
 func (a *QueueingModelAnalyzer) updateVariantParameters(
 	ctx context.Context,
 	namespace string,
 	modelID string,
-	metrics []interfaces.ReplicaMetrics,
+	variantNames []string,
+	variantMetrics map[string][]interfaces.ReplicaMetrics,
 	config *QMConfig,
 ) {
 	logger := ctrl.LoggerFrom(ctx)
 
-	// Group metrics by variant
-	variantMetrics := groupMetricsByVariant(metrics)
-
 	// Run tuner for each variant
-	for variantName, replicaMetrics := range variantMetrics {
-		// Build environment from aggregated replica metrics
-		env, err := buildEnvironmentFromMetrics(variantName, replicaMetrics)
-		if err != nil {
+	// (use variant names from slice instead of map to avoid randomness)
+	for _, variantName := range variantNames {
+		variantReplicaMetrics := variantMetrics[variantName]
+		if variantReplicaMetrics == nil {
+			logger.V(1).Info("No metric for variant", "variant", variantName)
+			continue
+		}
+		// Build environment from replica metrics
+		envs, err := buildEnvironmentsFromMetrics(variantName, variantReplicaMetrics)
+		if len(envs) == 0 || err != nil {
 			logger.V(1).Info("Failed to build environment for variant",
 				"variant", variantName,
 				"namespace", namespace,
@@ -274,8 +177,8 @@ func (a *QueueingModelAnalyzer) updateVariantParameters(
 			continue
 		}
 
-		// Create a tuner for this variant
-		tuner, err := a.createTunerForVariant(ctx, namespace, modelID, variantName, env, config.FilterConfig)
+		// Create a variantTuner for this variant
+		variantTuner, err := a.createTunerForVariant(ctx, namespace, modelID, variantName, envs[0], config.FilterConfig)
 		if err != nil {
 			logger.V(1).Info("Failed to get/create tuner for variant",
 				"variant", variantName,
@@ -285,12 +188,31 @@ func (a *QueueingModelAnalyzer) updateVariantParameters(
 		}
 
 		// Run tuner to learn parameters
-		results, err := tuner.Run()
-		if err != nil {
-			logger.V(1).Info("Tuner failed for variant",
+		var results *tuner.TunedResults
+		for _, env := range envs {
+			var err error
+			if err = variantTuner.UpdateEnvironment(env); err != nil {
+				logger.V(1).Info("Tuner could not update environment for variant",
+					"variant", variantName,
+					"namespace", namespace,
+					"error", err)
+				continue
+			}
+			results, err = variantTuner.Run()
+			if results.ValidationFailed {
+				err = fmt.Errorf("tune validation failed: %w", err)
+			}
+			if err != nil {
+				logger.V(1).Info("Tuner failed to run for variant",
+					"variant", variantName,
+					"namespace", namespace,
+					"error", err)
+			}
+		}
+		if results == nil {
+			logger.V(1).Info("Failed to tune variant",
 				"variant", variantName,
-				"namespace", namespace,
-				"error", err)
+				"namespace", namespace)
 			continue
 		}
 
@@ -315,12 +237,28 @@ func (a *QueueingModelAnalyzer) updateVariantParameters(
 	}
 }
 
+func (a *QueueingModelAnalyzer) getSLOTarget(
+	ctx context.Context,
+	namespace string,
+	modelID string,
+	config *QMConfig,
+	variantNames []string,
+	modelReplicaMetrics []interfaces.ReplicaMetrics,
+) *SLOTarget {
+	// First try explicit config
+	if slo := config.GetSLOForModel(namespace, modelID); slo != nil {
+		return slo
+	}
+	// Infer SLO from the queueing model and observed metrics
+	return a.guessSLOFromMetrics(ctx, namespace, modelID, config, variantNames, modelReplicaMetrics)
+}
+
 // calculate capacities for all variants of a model in a given namespace
 func (a *QueueingModelAnalyzer) computeAllVariantCapacities(
 	ctx context.Context,
 	namespace string,
 	modelID string,
-	replicaMetrics []interfaces.ReplicaMetrics,
+	variantMetrics map[string][]interfaces.ReplicaMetrics,
 	variantStates []interfaces.VariantReplicaState,
 	sloTarget *SLOTarget,
 ) []interfaces.VariantCapacity {
@@ -329,10 +267,10 @@ func (a *QueueingModelAnalyzer) computeAllVariantCapacities(
 	// Build cost and accelerator lookup from input metrics
 	variantCost := make(map[string]float64)
 	variantAccel := make(map[string]string)
-	for _, rm := range replicaMetrics {
-		if _, ok := variantCost[rm.VariantName]; !ok {
-			variantCost[rm.VariantName] = rm.Cost
-			variantAccel[rm.VariantName] = rm.AcceleratorName
+	for variantName, replicaMetrics := range variantMetrics {
+		if len(replicaMetrics) > 0 {
+			variantCost[variantName] = replicaMetrics[0].Cost
+			variantAccel[variantName] = replicaMetrics[0].AcceleratorName
 		}
 	}
 
@@ -349,58 +287,44 @@ func (a *QueueingModelAnalyzer) computeAllVariantCapacities(
 			ReplicaCount:    readyCount,
 			PendingReplicas: variantState.PendingReplicas,
 
-			PerReplicaCapacity: 1.0, // TODO: caller should handle variants withoout results, instead of relying on absolute values
-			TotalCapacity:      1.0,
+			PerReplicaCapacity: 0.0, // TODO: caller should handle variants without results, instead of relying on absolute values
+			TotalCapacity:      0.0,
 			TotalDemand:        0.0,
 			Utilization:        0.0,
 		}
 
 		// Accumulate data over all pod replicas of the variant
-		totalInputTokens := float32(0.0)
-		totalOutputTokens := float32(0.0)
-		totalArrivalRate := float32(0.0)
-		var maxBatchSize int64
-		numPods := 0
-		for _, rm := range replicaMetrics {
-			if rm.VariantName != variantName || rm.Namespace != namespace {
-				continue
-			}
-
-			// Skip pods with zero arrival rate (no traffic being dispatched)
-			if rm.ArrivalRate <= 0 {
-				continue
-			}
-
-			totalArrivalRate += float32(rm.ArrivalRate)
-			totalInputTokens += float32(rm.AvgInputTokens)
-			totalOutputTokens += float32(rm.AvgOutputTokens)
-
-			// MaxBatchSize is per-deployment (same for all pods of a variant),
-			// so any pod's value is representative
-			if rm.MaxBatchSize > 0 {
-				maxBatchSize = rm.MaxBatchSize
-			}
-			numPods++
+		replicaMetrics := variantMetrics[variantName]
+		if len(replicaMetrics) == 0 {
+			logger.Info("No replicas for variant", "variant", variantName)
+			vr := errorVariantCapacity
+			variantCapacities = append(variantCapacities, vr)
+			continue
 		}
-		if numPods == 0 {
+		wm := aggregateWorkloadMetrics(replicaMetrics)
+		if wm.busyPods == 0 {
 			logger.Info("No replicas with traffic to calculate capacity for variant", "variant", variantName)
 			vr := errorVariantCapacity
 			variantCapacities = append(variantCapacities, vr)
 			continue
 		}
 
-		// Fall back to default if MaxBatchSize was not parsed from deployment args
-		if maxBatchSize <= 0 {
-			maxBatchSize = DefaultMaxBatchSize
-		}
-
-		// Prefill and decode parameters
+		// get model parameters
 		params := a.getParams(modelID, namespace, variantName)
 		if params == nil {
 			logger.Info("No parameters found for variant", "variant", variantName)
 			vr := errorVariantCapacity
 			variantCapacities = append(variantCapacities, vr)
 			continue
+		}
+
+		// get max batch size
+		maxBatchSize := int64(DefaultMaxBatchSize)
+		for _, rm := range replicaMetrics {
+			if rm.MaxBatchSize > 0 {
+				maxBatchSize = rm.MaxBatchSize
+				break
+			}
 		}
 
 		// Create queue analyzer
@@ -415,8 +339,8 @@ func (a *QueueingModelAnalyzer) computeAllVariantCapacities(
 		}
 
 		requestSize := &analyzer.RequestSize{
-			AvgInputTokens:  totalInputTokens / float32(numPods),
-			AvgOutputTokens: totalOutputTokens / float32(numPods),
+			AvgInputTokens:  float32(wm.avgInputTokens),
+			AvgOutputTokens: float32(wm.avgOutputTokens),
 		}
 
 		targetPerf := &analyzer.TargetPerf{
@@ -432,14 +356,15 @@ func (a *QueueingModelAnalyzer) computeAllVariantCapacities(
 			continue
 		}
 
-		var maxRequestRate float32
+		// find max request rate to achieve target SLOs
+		var maxRequestRate float64
 		if _, metrics, _, err := queueAnalyzer.Size(targetPerf); err != nil {
 			logger.Info("Failed to calculate max request rate for variant", "variant", variantName, "error", err)
 			vr := errorVariantCapacity
 			variantCapacities = append(variantCapacities, vr)
 			continue
 		} else {
-			maxRequestRate = metrics.Throughput
+			maxRequestRate = float64(metrics.Throughput)
 		}
 
 		if maxRequestRate == 0 {
@@ -449,11 +374,12 @@ func (a *QueueingModelAnalyzer) computeAllVariantCapacities(
 			continue
 		}
 
-		desiredNumReplicas := math.Ceil(float64(totalArrivalRate) / float64(maxRequestRate))
+		totalArrivalRate := wm.avgArrivalRate * float64(wm.busyPods)
+		desiredNumReplicas := math.Ceil(totalArrivalRate / maxRequestRate)
 		if desiredNumReplicas == 0 {
 			desiredNumReplicas = 1
 		}
-		arrivalRatePerReplica := totalArrivalRate / float32(desiredNumReplicas)
+		arrivalRatePerReplica := totalArrivalRate / desiredNumReplicas
 
 		variantCapacity := interfaces.VariantCapacity{
 			VariantName:     variantName,
@@ -462,10 +388,10 @@ func (a *QueueingModelAnalyzer) computeAllVariantCapacities(
 			ReplicaCount:    readyCount,
 			PendingReplicas: variantState.PendingReplicas,
 
-			PerReplicaCapacity: float64(maxRequestRate),
-			TotalCapacity:      desiredNumReplicas * float64(maxRequestRate),
-			TotalDemand:        float64(totalArrivalRate),
-			Utilization:        float64(arrivalRatePerReplica / maxRequestRate),
+			PerReplicaCapacity: maxRequestRate,
+			TotalCapacity:      desiredNumReplicas * maxRequestRate,
+			TotalDemand:        totalArrivalRate,
+			Utilization:        arrivalRatePerReplica / maxRequestRate,
 		}
 		variantCapacities = append(variantCapacities, variantCapacity)
 	}
@@ -547,71 +473,95 @@ func (a *QueueingModelAnalyzer) createTunerForVariant(
 	return t, nil
 }
 
-// storeParametersFromResults saves tuned results to the parameter store.
-func (a *QueueingModelAnalyzer) storeParametersFromResults(
-	namespace, modelID, variantName string,
-	results *tuner.TunedResults,
-) {
-	// Extract covariance matrix
-	covariance := matrixToSlice2D(results.Covariance)
+// guessSLOFromMetrics infers SLO targets from the queueing model when no
+// explicit SLO configuration is provided.
+//
+// The SLO is defined using the idle-latency multiplier approach: the queueing
+// delay (T_iter) is allowed to inflate by a fixed multiplier k relative to the
+// idle baseline α, while deterministic work components remain at their true cost.
+//
+// Formulas (all values in milliseconds):
+//
+//	TargetTTFT = k×α + (β+γ)×i_l
+//	TargetITL  = k×α + β + γ×(i_l + (o_l+1)/2)
+//
+// This gives exact utilization correspondence: ρ = 1 - 1/k.
+// k is a fixed constant (not dependent on system state) because SLOs are contracts.
+//
+// When learned parameters are unavailable, falls back to observed latencies
+// with a headroom multiplier, capped at reasonable maximums.
+func (a *QueueingModelAnalyzer) guessSLOFromMetrics(
+	ctx context.Context,
+	namespace string,
+	modelID string,
+	config *QMConfig,
+	variantNames []string,
+	modelReplicaMetrics []interfaces.ReplicaMetrics,
+) *SLOTarget {
+	logger := ctrl.LoggerFrom(ctx)
 
-	params := &LearnedParameters{
-		Alpha:       results.ServiceParms.Alpha,
-		Beta:        results.ServiceParms.Beta,
-		Gamma:       results.ServiceParms.Gamma,
-		NIS:         results.NIS,
-		Covariance:  covariance,
-		LastUpdated: time.Now(),
-	}
-
-	a.setParams(modelID, namespace, variantName, params)
-}
-
-func (a *QueueingModelAnalyzer) emptyResult(input interfaces.AnalyzerInput) *interfaces.AnalyzerResult {
-	return &interfaces.AnalyzerResult{
-		AnalyzerName: a.Name(),
-		ModelID:      input.ModelID,
-		Namespace:    input.Namespace,
-		AnalyzedAt:   time.Now(),
-	}
-}
-
-// workloadMetrics holds aggregated workload characteristics across replicas.
-type workloadMetrics struct {
-	avgInputTokens  float64
-	avgOutputTokens float64
-	avgTTFT         float64 // seconds
-	avgITL          float64 // seconds
-}
-
-// aggregateWorkloadMetrics averages token sizes and latencies across replicas
-// that have active traffic. Returns nil if no replicas have traffic.
-func aggregateWorkloadMetrics(metrics []interfaces.ReplicaMetrics) *workloadMetrics {
-	var totalArrivalRate float64
-	var totalInputToks, totalOutputToks float64
-	var totalTTFT, totalITL float64
-
-	for _, rm := range metrics {
-		if rm.ArrivalRate <= 0 {
-			continue
-		}
-		totalArrivalRate += rm.ArrivalRate
-		totalInputToks += rm.ArrivalRate * rm.AvgInputTokens
-		totalOutputToks += rm.ArrivalRate * rm.AvgOutputTokens
-		totalTTFT += rm.ArrivalRate * rm.AvgTTFT
-		totalITL += rm.ArrivalRate * rm.AvgITL
-	}
-
-	if totalArrivalRate == 0 {
+	// Aggregate workload characteristics
+	wm := aggregateWorkloadMetrics(modelReplicaMetrics)
+	if wm.busyPods == 0 {
 		return nil
 	}
 
-	return &workloadMetrics{
-		avgInputTokens:  totalInputToks / totalArrivalRate,
-		avgOutputTokens: totalOutputToks / totalArrivalRate,
-		avgTTFT:         totalTTFT / totalArrivalRate,
-		avgITL:          totalITL / totalArrivalRate,
+	// Get the SLO multiplier (default if not configured)
+	k := config.SLOMultiplier
+	if k <= 1.0 {
+		k = DefaultSLOMultiplier
 	}
+
+	// Try theory-based SLO: take the max of SLO targets over variants with learned parameters
+	var SLOTargetForModel *SLOTarget
+	for _, variantName := range variantNames {
+		params := a.getParams(modelID, namespace, variantName)
+		if params == nil || params.Alpha <= 0 || params.Beta <= 0 || params.Gamma <= 0 {
+			continue
+		}
+
+		alpha := float64(params.Alpha)
+		beta := float64(params.Beta)
+		gamma := float64(params.Gamma)
+
+		// T_iter at SLO utilization: k × α = α/(1-ρ) where ρ = 1-1/k
+		tIterSLO := k * alpha
+
+		// Deterministic work — NOT inflated by k
+		prefillWork := (beta + gamma) * wm.avgInputTokens
+		decodeWork := beta + gamma*(wm.avgInputTokens+(wm.avgOutputTokens+1.0)/2.0)
+
+		ttftSLO := tIterSLO + prefillWork
+		itlSLO := tIterSLO + decodeWork
+
+		logger.V(1).Info("Inferred SLO from queueing model",
+			"variant", variantName,
+			"k", k,
+			"alpha", alpha, "beta", beta, "gamma", gamma,
+			"avgInputTokens", wm.avgInputTokens,
+			"avgOutputTokens", wm.avgOutputTokens,
+			"TargetTTFT_ms", ttftSLO,
+			"TargetITL_ms", itlSLO,
+		)
+
+		SLOTargetForVariant := &SLOTarget{
+			TargetTTFT: float32(ttftSLO),
+			TargetITL:  float32(itlSLO),
+		}
+
+		if SLOTargetForModel == nil {
+			SLOTargetForModel = SLOTargetForVariant
+		} else {
+			SLOTargetForModel.Max(SLOTargetForVariant)
+		}
+	}
+
+	// Fallback: use observed latencies with headroom if none of the variants have
+	// learned parameters (e.g. cold start / early tuning cycles)
+	if SLOTargetForModel == nil {
+		return fallbackSLOFromObservations(ctx, wm)
+	}
+	return SLOTargetForModel
 }
 
 // fallbackSLOFromObservations creates SLO targets from observed TTFT/ITL
@@ -644,81 +594,94 @@ func fallbackSLOFromObservations(
 	}
 }
 
-// buildEnvironmentFromMetrics creates a tuner Environment from aggregated replica metrics.
-// Aggregates per-replica metrics (arrival rate, avg tokens, TTFT, ITL, max batch size)
-// into a single Environment representing the variant's current operating state.
+// storeParametersFromResults saves tuned results to the parameter store.
+func (a *QueueingModelAnalyzer) storeParametersFromResults(
+	namespace, modelID, variantName string,
+	results *tuner.TunedResults,
+) {
+	// Extract covariance matrix
+	covariance := matrixToSlice2D(results.Covariance)
+
+	params := &LearnedParameters{
+		Alpha:       results.ServiceParms.Alpha,
+		Beta:        results.ServiceParms.Beta,
+		Gamma:       results.ServiceParms.Gamma,
+		NIS:         results.NIS,
+		Covariance:  covariance,
+		LastUpdated: time.Now(),
+	}
+
+	a.setParams(modelID, namespace, variantName, params)
+}
+
+// buildEnvironmentsFromMetrics creates Environments for the tuner, depending on
+// the setting of TuningByAggregatingPodsForVariant.
+// true: single environment from aggregating all pods, representing the variant's
+// current operating state.
+// false: multiple environments, one per pod
 // Returns error if required metrics are unavailable.
-func buildEnvironmentFromMetrics(
+func buildEnvironmentsFromMetrics(
 	variantName string,
-	metrics []*interfaces.ReplicaMetrics,
-) (*tuner.Environment, error) {
-	if len(metrics) == 0 {
+	variantReplicaMetrics []interfaces.ReplicaMetrics,
+) ([]*tuner.Environment, error) {
+	if len(variantReplicaMetrics) == 0 {
 		return nil, fmt.Errorf("no replica metrics for variant %s", variantName)
 	}
 
 	// MaxBatchSize is per-deployment (same for all replicas of a variant),
 	// so we extract it once from the first replica that has it.
 	maxBatchSize := int64(DefaultMaxBatchSize)
-	for _, rm := range metrics {
+	for _, rm := range variantReplicaMetrics {
 		if rm.MaxBatchSize > 0 {
 			maxBatchSize = rm.MaxBatchSize
 			break
 		}
 	}
 
-	// Aggregate per-pod traffic metrics across replicas
-	// TODO: option 1: TTFT and ITL must be weighted based on the arrival rate
-	// TODO: option 2, just take any one pod (maybe the oldest?) that is a good representative of a variant load statistics.
-	var totalArrivalRate float64
-	var totalInputToks, totalOutputToks float64
-	var totalTTFT, totalITL float64
-	validPods := 0
-
-	for _, rm := range metrics {
-		// Skip pods without arrival rate (no traffic)
-		if rm.ArrivalRate <= 0 {
-			continue
+	envs := []*tuner.Environment{}
+	if TuningByAggregatingPodsForVariant {
+		// create an environment by aggregating all server pods into an equivalent server
+		wm := aggregateWorkloadMetrics(variantReplicaMetrics)
+		if wm.busyPods == 0 {
+			return nil, fmt.Errorf("no replicas with traffic for variant %s", variantName)
 		}
 
-		totalArrivalRate += rm.ArrivalRate
-		totalInputToks += rm.AvgInputTokens
-		totalOutputToks += rm.AvgOutputTokens
-		totalTTFT += rm.AvgTTFT
-		totalITL += rm.AvgITL
-		validPods++
+		env := &tuner.Environment{
+			Lambda:        float32(wm.avgArrivalRate * 60), // Convert reqs/sec to reqs/min for tuner
+			AvgInputToks:  float32(wm.avgInputTokens),
+			AvgOutputToks: float32(wm.avgOutputTokens),
+			MaxBatchSize:  int(maxBatchSize),
+			AvgTTFT:       float32(wm.avgTTFT * 1000.0), // convert secs to msecs for tuner
+			AvgITL:        float32(wm.avgITL * 1000.0),  // convert secs to msecs for tuner
+		}
+
+		if !env.Valid() {
+			return nil, fmt.Errorf("invalid environment for variant %s: %v", variantName, env)
+		}
+		envs = append(envs, env)
+	} else {
+		// create environments for server pods with valid data
+		for _, rm := range variantReplicaMetrics {
+			if rm.ArrivalRate <= 0 {
+				continue
+			}
+			env := &tuner.Environment{
+				Lambda:        float32(rm.ArrivalRate * 60), // Convert reqs/sec to reqs/min for tuner
+				MaxBatchSize:  int(maxBatchSize),
+				AvgInputToks:  float32(rm.AvgInputTokens),
+				AvgOutputToks: float32(rm.AvgOutputTokens),
+				AvgTTFT:       float32(rm.AvgTTFT * 1000), // Convert from microseconds to milliseconds for tuner
+				AvgITL:        float32(rm.AvgITL * 1000),  // Convert from microseconds to milliseconds for tuner
+			}
+			if env.Valid() {
+				envs = append(envs, env)
+			}
+		}
+		if len(envs) == 0 {
+			return nil, fmt.Errorf("no replicas with traffic for variant %s", variantName)
+		}
 	}
-
-	if validPods == 0 {
-		return nil, fmt.Errorf("no replicas with traffic for variant %s", variantName)
-	}
-
-	avgInputToks := totalInputToks / float64(validPods)
-	avgOutputToks := totalOutputToks / float64(validPods)
-	avgTTFT := totalTTFT / float64(validPods)
-	avgITL := totalITL / float64(validPods)
-
-	// Convert arrival rate from requests/sec to requests/min for tuner
-	lambdaPerMinute := totalArrivalRate * 60.0
-
-	// Convert TTFT and ITL from seconds to milliseconds for tuner
-	avgTTFTMs := avgTTFT * 1000.0
-	avgITLMs := avgITL * 1000.0
-
-	env := &tuner.Environment{
-		Lambda:        float32(lambdaPerMinute),
-		AvgInputToks:  float32(avgInputToks),
-		AvgOutputToks: float32(avgOutputToks),
-		MaxBatchSize:  int(maxBatchSize),
-		AvgTTFT:       float32(avgTTFTMs),
-		AvgITL:        float32(avgITLMs),
-	}
-
-	if !env.Valid() {
-		return nil, fmt.Errorf("invalid environment for variant %s: lambda=%.2f, inputToks=%.2f, outputToks=%.2f, TTFT=%.2fms, ITL=%.2fms, maxBatch=%d",
-			variantName, lambdaPerMinute, avgInputToks, avgOutputToks, avgTTFTMs, avgITLMs, maxBatchSize)
-	}
-
-	return env, nil
+	return envs, nil
 }
 
 // guessInitState makes an initial guess of the state estimates based on observed metrics.
@@ -806,6 +769,7 @@ func guessInitState(env *tuner.Environment) ([]float64, error) {
 	return ParamsToStateVector(alpha, beta, gamma), nil
 }
 
+// aggregateCapacities calculates the sum of supply and demand over all variants
 func aggregateCapacities(capacities []interfaces.VariantCapacity) (supply, demand float64) {
 	for _, c := range capacities {
 		supply += c.TotalCapacity
@@ -815,10 +779,74 @@ func aggregateCapacities(capacities []interfaces.VariantCapacity) (supply, deman
 }
 
 // groupMetricsByVariant groups replica metrics by variant name.
-func groupMetricsByVariant(metrics []interfaces.ReplicaMetrics) map[string][]*interfaces.ReplicaMetrics {
-	grouped := make(map[string][]*interfaces.ReplicaMetrics)
-	for _, m := range metrics {
-		grouped[m.VariantName] = append(grouped[m.VariantName], &m)
+func groupMetricsByVariant(modelReplicaMetrics []interfaces.ReplicaMetrics) map[string][]interfaces.ReplicaMetrics {
+	grouped := make(map[string][]interfaces.ReplicaMetrics)
+	for _, replicaMetric := range modelReplicaMetrics {
+		grouped[replicaMetric.VariantName] = append(grouped[replicaMetric.VariantName], replicaMetric)
 	}
 	return grouped
+}
+
+// getVariantNames returns the variant names, derived from replicaMetrics,
+// in the order they appear in the slice
+func getVariantNames(replicaMetrics []interfaces.ReplicaMetrics) []string {
+	names := []string{}
+	namesMap := make(map[string]bool)
+	for _, replicaMetric := range replicaMetrics {
+		variantName := replicaMetric.VariantName
+		if !namesMap[variantName] {
+			namesMap[variantName] = true
+			names = append(names, variantName)
+		}
+	}
+	return names
+}
+
+// workloadMetrics holds workload characteristics for a server.
+type workloadMetrics struct {
+	avgArrivalRate  float64 // req/sec
+	avgInputTokens  float64
+	avgOutputTokens float64
+	avgTTFT         float64 // seconds
+	avgITL          float64 // seconds
+	busyPods        int
+}
+
+// aggregateWorkloadMetrics averages token sizes and latencies across replicas
+// that have active traffic. Returns zero metrics if no replicas have traffic.
+func aggregateWorkloadMetrics(replicaMetrics []interfaces.ReplicaMetrics) *workloadMetrics {
+	var totalArrivalRate float64
+	var totalInputToks, totalOutputToks float64
+	var totalTTFT, totalITL float64
+
+	// Aggregate per-pod traffic metrics across replicas
+	// TODO: option 1: metrics weighted based on arrival rates (below)
+	// TODO: option 2: metrics added across pods
+	// TODO: option 3, just take any one pod (maybe the oldest?) that is a good representative of a variant load statistics.
+
+	busyPods := 0
+	for _, rm := range replicaMetrics {
+		if rm.ArrivalRate <= 0 {
+			continue
+		}
+		totalArrivalRate += rm.ArrivalRate
+		totalInputToks += rm.ArrivalRate * rm.AvgInputTokens
+		totalOutputToks += rm.ArrivalRate * rm.AvgOutputTokens
+		totalTTFT += rm.ArrivalRate * rm.AvgTTFT
+		totalITL += rm.ArrivalRate * rm.AvgITL
+		busyPods++
+	}
+
+	if busyPods == 0 {
+		return &workloadMetrics{}
+	}
+
+	return &workloadMetrics{
+		avgArrivalRate:  totalArrivalRate / float64(busyPods),
+		avgInputTokens:  totalInputToks / totalArrivalRate,
+		avgOutputTokens: totalOutputToks / totalArrivalRate,
+		avgTTFT:         totalTTFT / totalArrivalRate,
+		avgITL:          totalITL / totalArrivalRate,
+		busyPods:        busyPods,
+	}
 }

@@ -22,4 +22,10 @@ const (
 	// DefaultFallbackHeadroom is the multiplier applied to observed latencies
 	// when learned parameters are unavailable and we fall back to observations.
 	DefaultFallbackHeadroom = 1.5
+
+	// TuningByAggregatingPodsForVariant is a selection switch used when
+	// tuning the queueing model for a variant.
+	// true: run the tuner once for an aggregate server of all pods
+	// false: run the tuner for all pods of the variant
+	TuningByAggregatingPodsForVariant = false
 )
