@@ -234,21 +234,21 @@ data:
     # Default: 3.0
     sloMultiplier: 3.0
 
-    # tuningEnabled controls whether the Kalman filter runs each cycle.
-    # true  (default): learns alpha/beta/gamma from live TTFT/ITL observations.
-    # false: skips the tuner; requires explicit targetTTFT/targetITL per model,
-    #        or falls back to the observation-based heuristic (see Section 6.3).
+    # tuningEnabled must always be true. The queueing model requires learned
+    # (alpha, beta, gamma) parameters to compute capacity; without the Kalman
+    # filter running, no parameters are ever produced and the analyzer cannot
+    # make scaling decisions.
     tuningEnabled: true
 
   # ── Per-model overrides (optional) ─────────────────────────────────────────
   # Key name is arbitrary. model_id + namespace identify the target model.
-  # Per-model entries override sloMultiplier and tuningEnabled from the default,
-  # and can provide explicit SLO targets.
+  # Per-model entries override sloMultiplier from the default and can provide
+  # explicit SLO targets.
   #
   # Rules:
   #   - targetTTFT and targetITL must both be set, or both omitted (0 = infer).
   #   - If both are set, the explicit SLOs are used directly; the inferred SLO
-  #     path is skipped (but tuning can still be enabled to keep parameters fresh).
+  #     path is skipped (tuning still runs to keep parameters fresh).
   #   - If omitted, SLOs are inferred from learned parameters and sloMultiplier
   #     (or from observations if tuning hasn't converged yet).
 
@@ -259,22 +259,12 @@ data:
     targetTTFT: 500.0    # ms — time-to-first-token budget
     targetITL: 50.0      # ms — per-token decode budget
     sloMultiplier: 3.0
-    tuningEnabled: true
 
   # Example: inferred SLOs with a more aggressive utilisation target
   mistral-staging: |
     model_id: "mistralai/Mistral-7B-Instruct-v0.2"
     namespace: "llm-d-staging"
     sloMultiplier: 4.0   # rho=0.75; SLO derived from k and learned parameters
-    tuningEnabled: true
-
-  # Example: tuning disabled, explicit SLOs required
-  llama-large: |
-    model_id: "meta-llama/Meta-Llama-3.1-70B-Instruct"
-    namespace: "llm-d-large"
-    targetTTFT: 2000.0
-    targetITL: 200.0
-    tuningEnabled: false
 ```
 
 ### Configuration field reference
@@ -282,7 +272,7 @@ data:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `sloMultiplier` | float | `3.0` | Utilisation target multiplier k (must be > 1.0). Target rho = 1 - 1/k. |
-| `tuningEnabled` | bool | `true` | Enable online Kalman filter parameter learning. |
+| `tuningEnabled` | bool | `true` | Must always be `true`. The queueing model requires learned parameters to function. |
 | `model_id` | string | — | Model identifier (per-model entries only). |
 | `namespace` | string | — | Kubernetes namespace (per-model entries only). |
 | `targetTTFT` | float | `0` | Explicit TTFT SLO in milliseconds. `0` = infer automatically. |
@@ -321,8 +311,8 @@ added at their true cost (not inflated by k).
 When multiple variants serve the same model, the SLO is taken as the **maximum** across
 variants — a single SLO per model, since all variants serve the same traffic.
 
-This mode requires tuning to have converged (typically 3–10 reconcile cycles after a variant
-first receives traffic).
+This mode requires the tuner to have converged, which typically takes 3–10 reconcile cycles
+after a variant first receives traffic.
 
 ### 6.3 Observation-Based Fallback (cold start)
 
@@ -415,7 +405,7 @@ Prometheus / vLLM metrics per pod
                           │
           ┌───────────────┴───────────────┐
           │                               │
-          ▼  (if tuningEnabled)           ▼
+          ▼                             ▼
   ┌───────────────┐               ┌────────────────────────┐
   │  Tuner (EKF)  │               │  SLO Resolution        │
   │               │               │  1. Explicit config    │
