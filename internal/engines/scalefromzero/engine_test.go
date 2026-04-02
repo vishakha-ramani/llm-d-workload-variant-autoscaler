@@ -35,6 +35,7 @@ import (
 	poolreconciler "github.com/llm-d/llm-d-workload-variant-autoscaler/internal/controller"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/datastore"
 	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils"
+	"github.com/llm-d/llm-d-workload-variant-autoscaler/internal/utils/scaletarget"
 	unittestutil "github.com/llm-d/llm-d-workload-variant-autoscaler/test/utils"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -473,8 +474,8 @@ func TestNamespacedMetricsSourceLookup(t *testing.T) {
 			}
 
 			// Get deployments map
-			deployments := map[string]*appsV1.Deployment{
-				tt.vaNamespace + "/" + deploymentName: dp,
+			deployments := map[string]scaletarget.ScaleTargetAccessor{
+				tt.vaNamespace + "/" + deploymentName: scaletarget.NewDeploymentAccessor(dp),
 			}
 
 			// Process the inactive variant
